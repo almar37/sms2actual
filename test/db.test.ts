@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventStore } from '../src/db.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 let stores: EventStore[] = [];
 afterEach(() => {
   for (const s of stores) s.close();
@@ -17,6 +20,28 @@ describe('event store', () => {
     const a = s.enqueue(input),
       b = s.enqueue({ ...input, message: 'hello world' });
     expect(b).toEqual({ id: a.id, duplicate: true });
+  });
+  it('keeps a selected inbox checkpoint after reopening the database', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sms2actual-checkpoint-'));
+    const path = join(directory, 'events.sqlite');
+    const chosen = { date: Date.parse('2026-10-01T09:30:00+03:00'), rowId: 0 };
+    try {
+      const first = new EventStore(path);
+      try {
+        first.setInboxCheckpoint(chosen.date, null);
+      } finally {
+        first.close();
+      }
+      const restored = new EventStore(path);
+      try {
+        expect(restored.inboxCheckpoint()).toEqual(chosen);
+        expect(restored.startInboxSync(Date.parse('2026-11-06T00:00:00Z'))).toEqual(chosen);
+      } finally {
+        restored.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
   it('recovers processing work after restart', () => {
     const s = new EventStore(':memory:');

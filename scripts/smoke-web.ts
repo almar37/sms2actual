@@ -304,11 +304,31 @@ try {
   await page.getByRole('button', { name: 'Save helper settings' }).click();
   await expect(page.getByRole('status')).toContainText('AI settings saved');
   await page.getByRole('link', { name: 'Tasker connection', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Start syncing from' })).toHaveValue('now');
+  const saveCheckpoint = page.getByRole('button', { name: 'Save checkpoint', exact: true });
+  await expect(saveCheckpoint).toBeEnabled();
+  const beforeCheckpoint = Date.now();
+  await saveCheckpoint.click();
+  await expect(page.getByRole('status')).toContainText('Inbox checkpoint saved');
+  expect(store.inboxCheckpoint()!.date).toBeGreaterThanOrEqual(beforeCheckpoint);
+  expect(store.inboxCheckpoint()!.date).toBeLessThanOrEqual(Date.now());
+  await page.getByRole('combobox', { name: 'Start syncing from' }).selectOption('custom');
+  await page.getByLabel(/^Checkpoint date and time/).fill('2026-10-01T09:30:15');
+  await saveCheckpoint.click();
+  await expect(page.getByRole('status')).toContainText('Inbox checkpoint saved');
+  const chosenCheckpoint = store.inboxCheckpoint()!;
+  const browserTimestamp = await page.evaluate(() => new Date('2026-10-01T09:30:15').getTime());
+  expect(chosenCheckpoint).toEqual({ date: browserTimestamp, rowId: 0 });
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.getByRole('link', { name: 'Tasker connection', exact: true }).click();
+  await expect(saveCheckpoint).toBeEnabled();
+  expect(store.inboxCheckpoint()).toEqual(chosenCheckpoint);
   await page.getByLabel('Public service URL').fill('https://sms.example.test');
   await page.getByRole('button', { name: 'Replace credential' }).click();
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download Tasker project' }).click();
   expect((await download).suggestedFilename()).toBe('sms2actual.prj.xml');
+  expect(store.inboxCheckpoint()).toEqual(chosenCheckpoint);
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible();
   await expect(page.getByLabel(/^Actual server URL/)).toHaveValue('http://actual:5006');
@@ -344,7 +364,7 @@ try {
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
-    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker download, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
+    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
   );
 } finally {
   await browser?.close();

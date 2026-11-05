@@ -271,6 +271,162 @@ describe('web onboarding', () => {
   });
 });
 
+describe('Tasker checkpoint controls', () => {
+  it('defaults new checkpoints to now and keeps a saved checkpoint when the page or phone reloads', async () => {
+    const { app, headers, store } = await server();
+    const initial = await app.inject({ url: '/api/console/tasker/checkpoint', headers });
+    expect(initial.json()).toEqual({ checkpoint: null });
+    expect(store.inboxCheckpoint()).toBeUndefined();
+    const before = Date.now();
+    const saved = await app.inject({
+      method: 'PUT',
+      url: '/api/console/tasker/checkpoint',
+      headers,
+      payload: { date: 'now', expected: null },
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    const checkpoint = saved.json().checkpoint;
+    expect(checkpoint.rowId).toBe(0);
+    expect(checkpoint.date).toBeGreaterThanOrEqual(before);
+    expect(checkpoint.date).toBeLessThanOrEqual(Date.now());
+    expect((await app.inject({ url: '/api/console/tasker/checkpoint', headers })).json()).toEqual({
+      checkpoint,
+    });
+    expect(store.startInboxSync(checkpoint.date + 300000)).toEqual(checkpoint);
+    await app.close();
+  });
+  it('lets the owner move backward and forward while keeping imported messages deduplicated', async () => {
+    const { app, headers, store } = await server();
+    const initial = store.startInboxSync(Date.now() - 5 * 24 * 60 * 60 * 1000);
+    const row = {
+      rowId: 7,
+      date: initial.date + 1000,
+      sender: 'SAB',
+      message: 'SAB purchase Card **1234 Amount SAR 1 at Example',
+    };
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/v1/inbox-sync/batch',
+      headers: { 'x-api-key': apiKey },
+      payload: { checkpoint: initial, rows: [row] },
+    });
+    expect(first.statusCode, first.body).toBe(202);
+    const eventId = first.json().results[0].eventId;
+    store.update(eventId, 'imported');
+    const older = await app.inject({
+      method: 'PUT',
+      url: '/api/console/tasker/checkpoint',
+      headers,
+      payload: { date: initial.date - 1000, expected: first.json().checkpoint },
+    });
+    expect(older.statusCode, older.body).toBe(200);
+    expect(older.json().checkpoint).toEqual({ date: initial.date - 1000, rowId: 0 });
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/api/v1/inbox-sync/batch',
+      headers: { 'x-api-key': apiKey },
+      payload: { checkpoint: older.json().checkpoint, rows: [row] },
+    });
+    expect(replay.statusCode, replay.body).toBe(202);
+    expect(replay.json().results[0]).toMatchObject({ eventId, outcome: 'duplicate' });
+    const laterDate = Date.now() - 24 * 60 * 60 * 1000;
+    const later = await app.inject({
+      method: 'PUT',
+      url: '/api/console/tasker/checkpoint',
+      headers,
+      payload: { date: laterDate, expected: replay.json().checkpoint },
+    });
+    expect(later.statusCode, later.body).toBe(200);
+    expect(store.inboxCheckpoint()).toEqual({ date: laterDate, rowId: 0 });
+    expect(store.get(eventId)?.status).toBe('imported');
+    expect(store.list({ limit: 10 })).toHaveLength(1);
+    const staleBatch = await app.inject({
+      method: 'POST',
+      url: '/api/v1/inbox-sync/batch',
+      headers: { 'x-api-key': apiKey },
+      payload: {
+        checkpoint: replay.json().checkpoint,
+        rows: [{ ...row, rowId: 8, date: row.date + 1000 }],
+      },
+    });
+    expect(staleBatch.statusCode).toBe(409);
+    expect(store.inboxCheckpoint()).toEqual({ date: laterDate, rowId: 0 });
+    expect(store.list({ limit: 10 })).toHaveLength(1);
+    await app.close();
+  });
+  it('rejects stale edits when Tasker creates or advances a checkpoint', async () => {
+    const { app, headers, store } = await server();
+    const initial = store.startInboxSync(Date.now() - 10000);
+    const created = await app.inject({
+      method: 'PUT',
+      url: '/api/console/tasker/checkpoint',
+      headers,
+      payload: { date: 'now', expected: null },
+    });
+    expect(created.statusCode).toBe(409);
+    expect(created.json().checkpoint).toEqual(initial);
+    store.commitInboxBatch(initial, [
+      {
+        row: { rowId: 4, date: initial.date + 1000, sender: null, message: null },
+        skipped: 'empty',
+      },
+    ]);
+    const advanced = store.inboxCheckpoint();
+    const stale = await app.inject({
+      method: 'PUT',
+      url: '/api/console/tasker/checkpoint',
+      headers,
+      payload: { date: initial.date - 1000, expected: initial },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().checkpoint).toEqual(advanced);
+    expect(store.inboxCheckpoint()).toEqual(advanced);
+    await app.close();
+  });
+  it('restricts edits to the signed-in owner and rejects invalid or future dates', async () => {
+    const { app, headers, store, settings } = await server();
+    const initial = store.startInboxSync(Date.now() - 10000);
+    expect((await app.inject('/api/console/tasker/checkpoint')).statusCode).toBe(401);
+    await app.inject({ method: 'POST', url: '/api/console/tasker/rotate', headers, payload: {} });
+    const taskerKey = settings.decrypt(settings.get<string>('taskerKey')!);
+    const payload = { date: 'now', expected: initial };
+    expect(
+      (
+        await app.inject({
+          method: 'PUT',
+          url: '/api/console/tasker/checkpoint',
+          headers: { origin, 'x-api-key': taskerKey },
+          payload,
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: 'PUT',
+          url: '/api/console/tasker/checkpoint',
+          headers: { cookie: headers.cookie, origin: 'https://evil.test' },
+          payload,
+        })
+      ).statusCode,
+    ).toBe(403);
+    for (const date of [-1, 1.5, 'invalid', null, Number.MAX_SAFE_INTEGER, Date.now() + 60000]) {
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/console/tasker/checkpoint',
+            headers,
+            payload: { date, expected: initial },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    expect(store.inboxCheckpoint()).toEqual(initial);
+    await app.close();
+  });
+});
+
 describe('console access and APIs', () => {
   it('requires browser sessions and forbids public signup and cross-origin owner setup', async () => {
     const { app } = await server(false);

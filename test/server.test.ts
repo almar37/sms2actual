@@ -149,11 +149,11 @@ describe('batch API', () => {
 });
 
 describe('inbox sync API', () => {
-  it('initializes seven days back and advances through accepted and discarded rows', async () => {
+  it('initializes at the current time and advances through accepted and discarded rows', async () => {
     const store = new EventStore(':memory:');
     stores.push(store);
     const app = buildApp(store);
-    const expectedStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const expectedStart = Date.now();
 
     const start = await app.inject({
       method: 'POST',
@@ -163,7 +163,7 @@ describe('inbox sync API', () => {
     const checkpoint = start.json().checkpoint;
     expect(checkpoint.rowId).toBe(0);
     expect(checkpoint.date).toBeGreaterThanOrEqual(expectedStart);
-    expect(checkpoint.date).toBeLessThanOrEqual(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    expect(checkpoint.date).toBeLessThanOrEqual(Date.now());
 
     const rows = [
       {

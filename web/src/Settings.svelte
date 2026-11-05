@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { api, when } from './api.js';
+  import { api, when, localDateInput } from './api.js';
   import Icon from './Icon.svelte';
   import ActualConnection from './ActualConnection.svelte';
   let {
@@ -22,6 +22,47 @@
     newPassword = $state(''),
     taskerApiKey = $state(''),
     revealingKey = $state(false);
+  let checkpoint = $state<{ date: number; rowId: number } | null>(null),
+    checkpointMode = $state('now'),
+    checkpointDate = $state(localDateInput(new Date().toISOString(), true)),
+    checkpointLoading = $state(true),
+    checkpointLoaded = $state(false),
+    checkpointBusy = $state(false);
+  async function loadCheckpoint() {
+    checkpointLoading = true;
+    checkpointLoaded = false;
+    try {
+      checkpoint = (await api('/api/console/tasker/checkpoint')).checkpoint;
+      checkpointLoaded = true;
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      checkpointLoading = false;
+    }
+  }
+  async function saveCheckpoint(event: SubmitEvent) {
+    event.preventDefault();
+    if (!checkpointLoaded || checkpointBusy) return;
+    checkpointBusy = true;
+    error = '';
+    try {
+      const date = checkpointMode === 'now' ? 'now' : new Date(checkpointDate).getTime();
+      if (date !== 'now' && !Number.isFinite(date))
+        throw new Error('Choose a valid checkpoint date and time');
+      const result = await api(
+        '/api/console/tasker/checkpoint',
+        { date, expected: checkpoint },
+        'PUT',
+      );
+      checkpoint = result.checkpoint;
+      notify('Inbox checkpoint saved. Tasker will use it on its next sync.');
+    } catch (e) {
+      error = (e as Error).message;
+      await loadCheckpoint();
+    } finally {
+      checkpointBusy = false;
+    }
+  }
   async function toggleTaskerKey() {
     if (taskerApiKey) {
       taskerApiKey = '';
@@ -112,7 +153,9 @@
     }
   }
   $effect(() => {
-    if (!tasker) {
+    if (tasker) {
+      void loadCheckpoint();
+    } else {
       taskerApiKey = '';
       void loadSessions();
     }
@@ -173,6 +216,49 @@
             >Use this key in Tasker’s X-API-Key header. It is also included in the downloaded XML.</small
           >
         </label>
+        <div class="subsection-heading"><h3>Inbox checkpoint</h3></div>
+        <p class="muted small">
+          {#if checkpointLoading}Loading checkpoint…
+          {:else if checkpoint}Current checkpoint: {new Date(checkpoint.date).toLocaleString()}
+          {:else if checkpointLoaded}Your first sync will start from now.{/if}
+        </p>
+        <form onsubmit={saveCheckpoint}>
+          <div class="form-grid">
+            <label
+              >Start syncing from<select bind:value={checkpointMode} disabled={checkpointBusy}>
+                <option value="now">Now</option>
+                <option value="custom">Choose a date and time</option>
+              </select></label
+            >
+            {#if checkpointMode === 'custom'}<label
+                >Checkpoint date and time<input
+                  type="datetime-local"
+                  step="1"
+                  bind:value={checkpointDate}
+                  required
+                  disabled={checkpointBusy}
+                /><small>Uses your device’s time zone.</small></label
+              >{/if}
+          </div>
+          <p class="muted small">
+            Save an earlier time to recheck older SMS, or a later time to skip unread messages
+            before it. Existing imports stay deduplicated. Your current checkpoint is kept until you
+            save a change.
+          </p>
+          <div class="form-actions">
+            <button
+              type="button"
+              onclick={() => {
+                error = '';
+                void loadCheckpoint();
+              }}
+              disabled={checkpointLoading || checkpointBusy}>Refresh checkpoint</button
+            >
+            <button class="primary" disabled={!checkpointLoaded || checkpointBusy}
+              >{checkpointBusy ? 'Saving…' : 'Save checkpoint'}</button
+            >
+          </div>
+        </form>
         <div class="endpoint-preview">
           <span class="method-badge">POST</span><code
             >{url.replace(/\/$/, '')}/api/v1/inbox-sync/batch</code
@@ -200,7 +286,8 @@
             <strong>Run the inbox sync</strong>
             <p>
               Run “Sync SMS Inbox To Actual Budget” once. The project then syncs every five minutes.
-              Your first sync starts with the last seven days.
+              It continues from your saved checkpoint. New checkpoints default to now; choose an
+              earlier date above to include older messages.
             </p>
           </li>
           <li>

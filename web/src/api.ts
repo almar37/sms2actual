@@ -50,9 +50,11 @@ export const actions = [
   ['fee', 'Bank fee'],
 ] as const;
 
-export function localDateInput(value: string) {
+export function localDateInput(value: string, includeSeconds = false) {
   const date = new Date(value);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, includeSeconds ? 19 : 16);
 }
 export function localDateIso(value: string) {
   const offset = -new Date(value).getTimezoneOffset();

@@ -24,11 +24,17 @@ When a new parser revision starts, it gives retained `ignored` and `needs_review
 
 ## How inbox sync works
 
-The Tasker project reads Android's SMS inbox (`content://sms/inbox`) every five minutes. It resumes from a checkpoint stored on the server, so it can catch up after Tasker stops or the phone loses connectivity. On first use, the checkpoint starts seven days in the past.
+The Tasker project reads Android's SMS inbox (`content://sms/inbox`) every five minutes. It resumes from a checkpoint stored on the server, so it can catch up after Tasker stops or the phone loses connectivity. A new checkpoint defaults to the current time. In **Tasker connection → Inbox checkpoint**, choose **Now** or a specific date and time, then save. Times in the form use your device’s time zone. Existing checkpoints are kept until you explicitly save a change; viewing the page or downloading the project does not reset them.
 
 The service supports one active inbox-sync phone. Disable the old phone's project before moving to another one. The old `%ActualSmsInboxV2*` Tasker globals are no longer used and can be deleted.
 
 Every SMS after the checkpoint passes through your private HTTPS service. The service checks the sender against `config/banks.yaml`, queues supported bank messages, and saves review-only bank messages for inspection. Unknown senders and empty messages are skipped without storing their content. Polling uses the inbox `date` as `receivedAt` and doesn't include location.
+
+### Change the checkpoint
+
+Use **Tasker connection → Inbox checkpoint** to choose the exact date and time to read from. Moving it backward rechecks older messages; moving it forward skips unread messages before the selected time. Previously imported messages stay deduplicated, and already queued messages are unaffected. The phone fetches the saved checkpoint on its next sync, so changing it does not require importing a new Tasker project.
+
+If Tasker advances the checkpoint while the form is open, saving returns a conflict and reloads the latest position. Review that position and save again. A batch sent with an older checkpoint also returns a conflict rather than overwriting the owner's choice.
 
 ### Recheck the last seven days
 

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { fromNodeHeaders } from 'better-auth/node';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import type { EventStore, StoredEvent } from './db.js';
+import { InboxCheckpointConflict, type EventStore, type StoredEvent } from './db.js';
 import type { ActualAdapter, Enricher, ResolvedConfig, ParsedTransaction } from './types.js';
 import type { Processor } from './processor.js';
 import {
@@ -613,6 +613,39 @@ export function registerConsole(
       }[]
     ).map((l) => ({ ...l, details: readJson(l.details) })),
   }));
+  app.get('/api/console/tasker/checkpoint', async () => ({
+    checkpoint: store.inboxCheckpoint() ?? null,
+  }));
+  app.put('/api/console/tasker/checkpoint', async (req, reply) => {
+    const timestamp = z.number().int().safe().min(0).max(8_640_000_000_000_000);
+    const body = z
+      .object({
+        date: z.union([z.literal('now'), timestamp]),
+        expected: z
+          .object({ date: timestamp, rowId: z.number().int().safe().min(0) })
+          .strict()
+          .nullable(),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success)
+      return reply.code(400).send({ error: 'Choose a valid checkpoint date and time' });
+    const now = Date.now();
+    const date = body.data.date === 'now' ? now : body.data.date;
+    if (date > now)
+      return reply.code(400).send({ error: 'The checkpoint cannot be in the future' });
+    try {
+      return store.setInboxCheckpoint(date, body.data.expected);
+    } catch (error) {
+      if (error instanceof InboxCheckpointConflict)
+        return reply.code(409).send({
+          error:
+            'The inbox checkpoint changed. Its latest position has been loaded; try saving again.',
+          checkpoint: error.checkpoint,
+        });
+      throw error;
+    }
+  });
   app.post('/api/console/tasker/credentials', async (_req, reply) => {
     const encrypted = options.settings.get<string>('taskerKey');
     if (!encrypted) return reply.code(409).send({ error: 'Generate a Tasker credential first' });

@@ -21,13 +21,13 @@ Complete setup in the browser:
 1. Set your workspace password (at least 8 characters). No username is needed.
 2. Enter your Actual server URL, server password, and budget Sync ID. Find the Sync ID in Actual under **Settings → Show advanced settings → Sync ID**. Enter the budget encryption password if enabled.
 3. In **Accounts & cards**, map existing Actual accounts to the bank and suffixes shown in your SMS. Choose an existing expense category for Bank Fees and save. The service never creates accounts or categories.
-4. In **Tasker connection**, enter an HTTPS service URL reachable by your phone, download the configured project, and import it into Tasker. Grant SMS permission, allow background activity, and run **Sync SMS Inbox To Actual Budget** once.
+4. In **Tasker connection**, enter an HTTPS service URL reachable by your phone, choose and save an inbox checkpoint (Now is the default, or select an earlier date and time), then download the configured project, and import it into Tasker. Grant SMS permission, allow background activity, and run **Sync SMS Inbox To Actual Budget** once.
 
 No `.env`, account YAML, CLI wizard, or manually generated API key is required. The first Docker build can take a few minutes. Only the first owner can register. Existing owners sign in with their current password; usernames are no longer required. The default port is bound to loopback; complete owner setup before exposing the service remotely.
 
 Messages remain queued until Actual and account routing are configured. The web UI stays available if the saved Actual connection fails; use **Settings → Actual server connection** to reconnect or change credentials. A different budget after imports requires a separate instance so message deduplication and audit history remain tied to the original budget.
 
-Tasker reads the last seven days of SMS on its first sync, then checks every five minutes. Check **SMS inbox** for imported messages or messages needing review. Repeated inbox syncs use stable identifiers to prevent duplicate imports.
+Tasker starts from your saved checkpoint and checks every five minutes. Without a saved checkpoint, its first sync starts from the current time. Check **SMS inbox** for imported messages or messages needing review. Repeated inbox syncs use stable identifiers to prevent duplicate imports.
 
 ## Remote access and Docker networking
 
@@ -102,7 +102,7 @@ For LAN access without a proxy, set `BIND_ADDRESS` to the host's LAN IP, `PUBLIC
 - **Accounts & cards:** account and card suffixes, transfer identifiers, credit limits, and default repayment accounts.
 - **Merchants and templates:** remember category corrections and teach unfamiliar message formats.
 - **AI categorization:** optional OpenCode Go, OpenAI, or Anthropic credentials and model settings. History is checked before AI is called.
-- **Tasker connection:** download the configured Android project, reveal its SMS key, or replace that credential.
+- **Tasker connection:** choose where SMS sync starts, move the saved checkpoint backward or forward, download the configured Android project, reveal its SMS key, or replace that credential.
 - **Settings:** Actual connection, password changes, and browser sessions.
 
 The Tasker key is separate from any optional legacy `.env` `API_KEY`. It can submit SMS and sync the inbox. Replacing it requires downloading and importing a new Tasker project. Normal UI setup does not need the legacy key.
