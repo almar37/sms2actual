@@ -2,11 +2,18 @@
   import { untrack } from 'svelte';
   import { api, when } from './api.js';
   import Icon from './Icon.svelte';
+  import ActualConnection from './ActualConnection.svelte';
   let {
     catalog,
     notify,
     tasker,
-  }: { catalog: any; notify: (message: string) => void; tasker: boolean } = $props();
+    refresh,
+  }: {
+    catalog: any;
+    notify: (message: string) => void;
+    tasker: boolean;
+    refresh: () => Promise<void>;
+  } = $props();
   let url = $state(untrack(() => catalog.publicUrl)),
     busy = $state(false),
     error = $state(''),
@@ -294,34 +301,6 @@
       </section>
     </div>
     <aside>
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <h2>Actual server connection</h2>
-            <p>The address sms2actual uses to connect to Actual.</p>
-          </div>
-        </div>
-        <div class="panel-body">
-          <label for="actual-server-address">Local Actual server address</label>
-          <input
-            id="actual-server-address"
-            type="url"
-            value={catalog.actualServerUrl ?? ''}
-            readonly
-            aria-describedby="actual-server-help actual-server-config"
-          />
-          <p id="actual-server-help" class="muted">
-            The sms2actual server must be able to reach Actual at this address. Docker addresses
-            such as <code>http://actual:5006</code> work when both services share a network. Your browser
-            does not need to reach this address.
-          </p>
-          <p id="actual-server-config" class="muted small">
-            This is the configured connection address. To change it, update <code
-              >ACTUAL_SERVER_URL</code
-            >
-            in the service’s <code>.env</code> file and recreate sms2actual.
-          </p>
-        </div>
-      </section>
+      <ActualConnection {catalog} {notify} {refresh} />
     </aside>
   </div>{/if}

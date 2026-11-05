@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { AppConfigFile, BankConfig } from './types.js';
 
 const envSchema = z.object({
-  API_KEY: z.string().min(16),
+  API_KEY: z.string().min(16).optional(),
   PUBLIC_URL: z.string().url().default('http://localhost:3000'),
   AUTH_SECRET: z.string().min(32).optional(),
   TRUSTED_ORIGINS: z
@@ -29,15 +29,15 @@ const envSchema = z.object({
           ),
       ),
     ),
-  ACTUAL_SERVER_URL: z.string().url(),
-  ACTUAL_PASSWORD: z.string().min(1),
-  ACTUAL_SYNC_ID: z.string().min(1),
+  ACTUAL_SERVER_URL: z.string().url().optional(),
+  ACTUAL_PASSWORD: z.string().min(1).optional(),
+  ACTUAL_SYNC_ID: z.string().min(1).optional(),
   ACTUAL_ENCRYPTION_PASSWORD: z.string().optional(),
   OPENCODE_GO_API_KEY: z.string().optional(),
   OPENCODE_GO_MODEL: z.string().default('deepseek-v4.1-flash'),
-  CONFIG_PATH: z.string().default('/config/accounts.yaml'),
-  BANKS_CONFIG_PATH: z.string().default('/config/banks.yaml'),
-  PARSING_CONFIG_PATH: z.string().default('/config/parsing.yaml'),
+  CONFIG_PATH: z.string().optional(),
+  BANKS_CONFIG_PATH: z.string().default('config/banks.yaml'),
+  PARSING_CONFIG_PATH: z.string().default('config/parsing.yaml'),
   DB_PATH: z.string().default('/data/events.sqlite'),
   ACTUAL_CACHE_DIR: z.string().default('/actual-cache'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),

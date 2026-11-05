@@ -296,6 +296,7 @@
       >Bank Fees category<select
         bind:value={settings.bankFeesCategoryId}
         onchange={() => (dirty = true)}
+        ><option value="" disabled>Choose an expense category</option
         >{#each catalog.categories.filter((c: any) => !c.isIncome) as category (category.id)}<option
             value={category.id}>{category.name}</option
           >{/each}</select

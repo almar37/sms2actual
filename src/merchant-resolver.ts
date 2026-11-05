@@ -6,6 +6,7 @@ import type {
 } from './types.js';
 import { EventStore, type MerchantMapping } from './db.js';
 import { resolveAccount } from './routing.js';
+import { currentBudgetDate } from './budget-date.js';
 
 const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
 
@@ -74,7 +75,7 @@ export class MerchantResolver {
     this.categoriesLoaded = true;
     this.seedLocalMappings();
     const accountIds = [...new Set(this.config.accounts.map((account) => account.id))];
-    const end = new Date().toISOString().slice(0, 10);
+    const end = currentBudgetDate();
     const histories = await Promise.all(
       accountIds.map((accountId) => this.actual.transactions(accountId, '1900-01-01', end)),
     );

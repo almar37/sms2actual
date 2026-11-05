@@ -47,6 +47,7 @@ export class Processor {
     private minConfidence = 0.7,
     merchantResolver?: MerchantResolver,
     private consoleConfig?: ConsoleConfig,
+    private canProcess: () => boolean = () => true,
   ) {
     this.merchantResolver =
       merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
@@ -71,7 +72,7 @@ export class Processor {
     while (this.running) await new Promise((r) => setTimeout(r, 20));
   }
   async tick() {
-    if (this.running) return;
+    if (this.running || !this.canProcess()) return;
     const event = this.store.claim();
     if (!event) return;
     this.running = true;

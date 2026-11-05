@@ -393,6 +393,7 @@ export function buildServer(options: {
       options.store,
       options.apiKey,
       consoleOptions.publicUrl,
+      consoleOptions.requireSetupKey,
     );
     registerConsole(app, consoleOptions, options.store, options.processor);
     app.addHook('onResponse', async (req, reply) => {

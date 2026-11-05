@@ -9,3 +9,5 @@ data
 actual-cache
 *.log
 transfer/
+.local
+runtime-secrets.json

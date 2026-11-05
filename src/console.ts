@@ -21,6 +21,8 @@ import { parseSms } from './parser.js';
 import { resolveSmsSource } from './sms-source.js';
 import { resolveTransferTarget } from './routing.js';
 import { generateTaskerProject } from './tasker-export.js';
+import { currentBudgetDate } from './budget-date.js';
+import { actualConnectionSchema, type ActualConnection } from './actual-connection.js';
 
 export interface ConsoleOptions {
   auth: ConsoleAuth;
@@ -29,6 +31,9 @@ export interface ConsoleOptions {
   config: ResolvedConfig;
   publicUrl: string;
   actualServerUrl?: string;
+  requireSetupKey?: boolean;
+  connection?: Pick<ActualConnection, 'status' | 'connect' | 'initialize'>;
+  onRoutingChanged?: () => Promise<void>;
   trustedOrigins?: string[];
   enricher: Enricher;
   taskerTemplatePath?: string;
@@ -55,6 +60,54 @@ export function registerConsole(
   });
   const validateCategory = async (id?: string) =>
     !id || (await options.actual.categories()).some((c) => c.id === id && !c.hidden);
+  app.get(
+    '/api/console/actual',
+    async () =>
+      options.connection?.status() ?? {
+        configured: true,
+        connected: true,
+        connecting: false,
+        ready: Boolean(options.config.accounts.length && options.config.bankFeesCategoryId),
+        serverURL: options.actualServerUrl ?? '',
+        syncId: '',
+        error: null,
+      },
+  );
+  app.post('/api/console/actual', async (req, reply) => {
+    if (!options.connection)
+      return reply.code(409).send({ error: 'Connection is managed by the service environment' });
+    const parsed = actualConnectionSchema.safeParse(req.body);
+    if (!parsed.success)
+      return reply
+        .code(400)
+        .send({ error: 'Enter a valid Actual server address, password, and budget Sync ID' });
+    if (options.connection.status().connecting)
+      return reply.code(409).send({ error: 'An Actual connection is already in progress' });
+    try {
+      await options.connection.connect(parsed.data);
+      await options.onRoutingChanged?.();
+      return options.connection.status();
+    } catch (error) {
+      return reply
+        .code(400)
+        .send({ error: error instanceof Error ? error.message : 'Could not connect to Actual' });
+    }
+  });
+  app.post('/api/console/actual/reconnect', async (_req, reply) => {
+    if (!options.connection?.status().configured)
+      return reply.code(409).send({ error: 'Save an Actual connection first' });
+    if (options.connection.status().connecting)
+      return reply.code(409).send({ error: 'An Actual connection is already in progress' });
+    try {
+      await options.connection.initialize();
+      await options.onRoutingChanged?.();
+      return options.connection.status();
+    } catch {
+      return reply
+        .code(400)
+        .send({ error: 'Could not reconnect to Actual. Check your connection settings.' });
+    }
+  });
   app.get('/api/console/settings', async () => {
     const [accounts, categories] = await Promise.all([
       options.actual.accounts(),
@@ -67,7 +120,8 @@ export function registerConsole(
       banks: options.config.banks,
       publicUrl: options.publicUrl,
       actualUrl: options.settings.get('actualUrl') ?? '',
-      actualServerUrl: options.actualServerUrl ?? '',
+      actualServerUrl: options.connection?.status().serverURL ?? options.actualServerUrl ?? '',
+      connection: options.connection?.status(),
       limits: Object.fromEntries(
         accounts.map((a) => [a.id, options.settings.get(`limit:${a.id}`)]),
       ),
@@ -133,6 +187,7 @@ export function registerConsole(
       );
       options.settings.set('routing', settings);
       options.settings.apply(settings, options.config, categories);
+      await options.onRoutingChanged?.();
       return { ok: true };
     } catch (error) {
       return reply
@@ -140,15 +195,21 @@ export function registerConsole(
         .send({ error: error instanceof Error ? error.message : 'Invalid configuration' });
     }
   });
-  app.get('/api/console/summary', async () => {
-    await options.actual.sync();
+  app.get('/api/console/summary', async (_req, reply) => {
+    try {
+      await options.actual.sync();
+    } catch {
+      return reply.code(503).send({
+        error: 'Could not refresh from Actual. Check the connection and try again.',
+      });
+    }
     const accounts = await options.actual.accounts();
-    const date = new Date().toISOString().slice(0, 10);
+    const date = currentBudgetDate();
     const data = await Promise.all(
       accounts.map(async (a) => ({
         ...a,
         balanceCents: options.actual.accountBalance
-          ? await options.actual.accountBalance(a.id)
+          ? await options.actual.accountBalance(a.id, date)
           : null,
         transactions: await options.actual.transactions(a.id, '1900-01-01', date, 10),
       })),

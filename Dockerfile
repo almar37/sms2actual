@@ -17,6 +17,7 @@ COPY package*.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY tasker ./tasker
+COPY config/banks.yaml config/parsing.yaml ./config/
 RUN mkdir -p /data /actual-cache && chown node:node /data /actual-cache
 USER node
 EXPOSE 3000

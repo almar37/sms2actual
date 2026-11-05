@@ -6,3 +6,4 @@ actual-cache/
 .gitenv
 config/accounts.yaml
 transfer/
+.local/

@@ -6,8 +6,13 @@
     catalog,
     navigate,
     notify,
-  }: { catalog: any; navigate: (page: string) => void; notify: (message: string) => void } =
-    $props();
+    refresh,
+  }: {
+    catalog: any;
+    navigate: (page: string) => void;
+    notify: (message: string) => void;
+    refresh: () => Promise<void>;
+  } = $props();
   let data = $state<any>(null),
     busy = $state(false),
     error = $state('');
@@ -32,11 +37,15 @@
     month: 'long',
     day: 'numeric',
   });
-  async function load() {
+  async function load(manual = false) {
+    if (busy) return;
     busy = true;
     try {
-      data = await api('/api/console/summary');
+      const summary = await api('/api/console/summary');
+      await refresh();
+      data = summary;
       error = '';
+      if (manual) notify('Budget refreshed from Actual');
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -65,12 +74,8 @@
         href={catalog.actualUrl}
         target="_blank"
         rel="noreferrer">Open Actual<Icon name="external" size={15} /></a
-      >{/if}<button
-      disabled={busy}
-      onclick={() => {
-        void load();
-        notify('Refreshing your budget');
-      }}><Icon name="refresh" size={16} />{busy ? 'Refreshing…' : 'Refresh'}</button
+      >{/if}<button disabled={busy} onclick={() => void load(true)}
+      ><Icon name="refresh" size={16} />{busy ? 'Refreshing…' : 'Refresh'}</button
     >
   </div>
 </div>

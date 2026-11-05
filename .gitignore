@@ -11,4 +11,7 @@ compose.host-override.yaml
 compose.proxy.yaml
 *.log
 transfer/
+.local/
+runtime-secrets.json
+compose.override.yaml
 compose.tailscale.yaml

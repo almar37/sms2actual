@@ -9,6 +9,8 @@ import { buildServer } from '../src/server.js';
 import { NoopEnricher } from '../src/enricher.js';
 import type { ActualAdapter, ResolvedConfig } from '../src/types.js';
 import type { Processor } from '../src/processor.js';
+import { ActualConnection } from '../src/actual-connection.js';
+import { currentBudgetDate } from '../src/budget-date.js';
 import { parseBankConfig } from '../src/config.js';
 import { compileParserConfig } from '../src/parsing/config.js';
 import YAML from 'yaml';
@@ -100,16 +102,44 @@ store.update(transferEvent.id, 'imported', {
     note: 'Synthetic transfer fixture',
   },
 });
+let remoteRevision = 0,
+  syncedRevision = 0,
+  failNextSync = false;
 const actual: ActualAdapter = {
   initialize: async () => {},
   shutdown: async () => {},
   serverVersion: async () => '26.9.0',
-  sync: async () => {},
+  sync: async () => {
+    if (failNextSync) {
+      failNextSync = false;
+      throw new Error('Synthetic Actual outage');
+    }
+    syncedRevision = remoteRevision;
+  },
   accounts: async () => accounts,
-  categories: async () => categories,
-  accountBalance: async (id) => ({ checking: 1854320, savings: 4200000, credit: -124850 })[id] ?? 0,
-  transactions: async (id) =>
-    Array.from({ length: 4 }, (_, i) => ({
+  categories: async () =>
+    categories.map((category) =>
+      category.id === 'food' && syncedRevision
+        ? { ...category, name: 'Updated food category' }
+        : category,
+    ),
+  accountBalance: async (id) =>
+    (({ checking: 1854320, savings: 4200000, credit: -124850 })[id] ?? 0) +
+    (id === 'checking' ? syncedRevision * 10000 : 0),
+  transactions: async (id) => [
+    ...(syncedRevision && id === 'checking'
+      ? [
+          {
+            id: 'new-in-actual',
+            accountId: id,
+            date: currentBudgetDate(),
+            payeeName: 'Updated from Actual',
+            categoryId: 'food',
+            amount: 10000,
+          },
+        ]
+      : []),
+    ...Array.from({ length: 4 }, (_, i) => ({
       id: `${id}-${i}`,
       accountId: id,
       date: `2026-11-${String(5 - i).padStart(2, '0')}`,
@@ -117,9 +147,18 @@ const actual: ActualAdapter = {
       categoryId: ['food', 'groceries', 'shopping', ''][i],
       amount: [-2500, -13475, -8900, 1500000][i],
     })),
+  ],
   transferPayee: async () => '',
   importTransactions: async () => ({ added: [], updated: [], errors: [] }),
 };
+const connection = new ActualConnection(
+  settings,
+  config,
+  '/unused',
+  undefined,
+  undefined,
+  () => actual,
+);
 const auth = await createConsoleAuth(store, origin, 'isolated-smoke-auth-secret-with-32-bytes');
 const app = buildServer({
   apiKey: setupKey,
@@ -130,7 +169,9 @@ const app = buildServer({
   console: {
     auth,
     settings,
-    actual,
+    actual: connection,
+    connection,
+    requireSetupKey: false,
     config,
     publicUrl: origin,
     actualServerUrl: 'http://actual:5006',
@@ -151,12 +192,18 @@ try {
   const artifactDir = process.env.WEB_SMOKE_ARTIFACT_DIR ?? '/tmp/sms2actual-web-smoke';
   await mkdir(artifactDir, { recursive: true });
   await page.goto(origin);
-  await page.getByLabel('Username').fill('smoke-owner');
+  await expect(page.getByLabel('Username')).toHaveCount(0);
   await expect(page.getByLabel('Email address')).toHaveCount(0);
   await expect(page.getByLabel('Your name')).toHaveCount(0);
   await page.getByLabel('Password', { exact: true }).fill('testpass');
-  await page.getByLabel(/^API key/).fill(setupKey);
+  await expect(page.getByLabel(/^API key/)).toHaveCount(0);
   await page.getByRole('button', { name: 'Create workspace' }).click();
+  await expect(page.getByRole('heading', { name: 'Actual server connection' })).toBeVisible();
+  await page.getByLabel(/^Actual server URL/).fill('http://actual:5006');
+  await page.getByLabel('Actual server password', { exact: true }).fill('fake-actual-password');
+  await page.getByLabel(/^Budget Sync ID/).fill('fake-budget-id');
+  await page.getByRole('button', { name: 'Connect Actual', exact: true }).click();
+
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Everyday account' })).toBeVisible();
   await page.screenshot({
@@ -171,6 +218,27 @@ try {
     animations: 'disabled',
   });
   await page.getByRole('button', { name: 'Light mode', exact: true }).click();
+  remoteRevision = 1;
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Budget refreshed from Actual');
+  await expect(page.getByText('Updated from Actual', { exact: true })).toBeVisible();
+  await expect(page.getByRole('row').filter({ hasText: 'Updated from Actual' })).toContainText(
+    'Updated food category',
+  );
+  const checkingCard = page
+    .locator('.holding-card')
+    .filter({ has: page.getByRole('heading', { name: 'Everyday account', exact: true }) });
+  await expect(checkingCard).toContainText(/18,643\.20/);
+  await page.getByRole('button', { name: 'Dismiss notification' }).click();
+  failNextSync = true;
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not refresh from Actual');
+  await expect(page.getByRole('status')).toHaveCount(0);
+  await expect(page.getByText('Updated from Actual', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Budget refreshed from Actual');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
   await page.getByRole('link', { name: 'Accounts & cards' }).click();
   await page.getByRole('button', { name: 'Add card', exact: true }).first().click();
   await page.getByLabel('Card name', { exact: true }).fill('Everyday debit');
@@ -243,13 +311,8 @@ try {
   expect((await download).suggestedFilename()).toBe('sms2actual.prj.xml');
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible();
-  await expect(page.getByLabel('Local Actual server address')).toHaveValue('http://actual:5006');
-  await expect(page.getByLabel('Local Actual server address')).toHaveAttribute('readonly', '');
-  await expect(
-    page.getByText('The sms2actual server must be able to reach Actual at this address.', {
-      exact: false,
-    }),
-  ).toBeVisible();
+  await expect(page.getByLabel(/^Actual server URL/)).toHaveValue('http://actual:5006');
+  await expect(page.getByRole('button', { name: 'Reconnect saved connection' })).toBeVisible();
   await expect(page.getByLabel('Browser URL for Actual')).toHaveCount(0);
   await page.screenshot({
     path: `${artifactDir}/settings.png`,
@@ -275,13 +338,13 @@ try {
   await page.getByRole('button', { name: 'Sign out', exact: true }).first().click();
   await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
   await expect(page.getByLabel('Email address')).toHaveCount(0);
-  await page.getByLabel('Username').fill('SMOKE-OWNER');
+  await expect(page.getByLabel('Username')).toHaveCount(0);
   await page.getByLabel('Password', { exact: true }).fill('newpass8');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
-    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker download, sessions, password change, username sign-in, logout, themes and mobile layout. Screenshots: ${artifactDir}`,
+    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker download, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
   );
 } finally {
   await browser?.close();

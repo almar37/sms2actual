@@ -30,9 +30,20 @@ describe('public release configuration', () => {
   });
 
   it('does not require a deployment-specific host mapping during setup', () => {
-    expect(read('.env.example')).not.toContain('ACTUAL_HOST_IP=');
+    expect(read('.env.example')).not.toMatch(/^ACTUAL_HOST_IP=/m);
     const setupScript = read('scripts/setup-docker.sh');
     expect(setupScript).toContain('ACTUAL_SMS_ACTUAL_HOST:-}');
     expect(setupScript).not.toContain('ACTUAL_SMS_ACTUAL_HOST:-actual.');
+  });
+
+  it('boots the default Compose project without local config files or private networks', () => {
+    const compose = YAML.parse(read('compose.yaml'));
+    const service = compose.services['actual-sms'];
+    expect(service.build).toBe('.');
+    expect(service.env_file).toBeUndefined();
+    expect(service.volumes).toEqual(['sms-data:/data', 'actual-cache:/actual-cache']);
+    expect(service.networks).toBeUndefined();
+    expect(service.extra_hosts).toBeUndefined();
+    expect(read('Dockerfile')).toContain('COPY config/banks.yaml config/parsing.yaml ./config/');
   });
 });

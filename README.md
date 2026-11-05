@@ -1,357 +1,156 @@
 # sms2actual
 
-Turn bank SMS notifications into transactions in Actual Budget.
+Import bank SMS notifications into [Actual Budget](https://actualbudget.org/) with Android Tasker. Messages enter a durable queue, transfers between your accounts become linked transfers, and merchant history helps categorize spending. Optional AI can suggest merchant names and categories.
 
-Tasker checks your Android phone's inbox and sends new messages to this self-hosted service. The service saves supported bank messages to a queue, reads the transaction details, and imports them into your budget through Actual's official API. If your phone goes offline, Tasker picks up where it left off on the next sync.
+Includes English and Arabic recognition for SAB, Al Rajhi, Wadaie, and D360. STC Bank messages are retained for review. Add banks in YAML or teach message templates in the web UI.
 
-The included configuration supports SAB, Al Rajhi, Wadaie, and D360. STC Bank messages are saved for review without creating transactions. You can add banks and adjust SMS recognition in YAML. You can also enable OpenCode Go to clean up merchant names and suggest categories.
+## Quick start
 
-For the Homebase deployment using an existing Cloudflare Tunnel, see
-[the deployment guide](DEPLOYMENT.md).
+You need Docker with Compose, an existing **Actual Budget 26.9.0** server and budget, and Android with Tasker. Node.js and npm are not required on the Docker host.
 
-## Web workspace
-
-sms2actual includes a Svelte 5 frontend served by the same Fastify service. It has high-contrast light and dark themes, a custom SVG logo, and responsive layouts for desktop and mobile.
-
-After completing the existing Actual connection setup below:
-
-1. Set `PUBLIC_URL` in `.env` to the exact browser origin (for example, `https://sms.example.com`). Keep the service behind HTTPS in production. For local use, the default is `http://localhost:3000`. To use additional local or Tailscale addresses, set `TRUSTED_ORIGINS` to their exact HTTP origins, separated by commas, and bind the corresponding host ports in Compose.
-2. Rebuild and start the service with `docker compose up -d --build` using your Compose file.
-3. Open that URL and create the workspace owner. The first-time setup form requires the existing `API_KEY` from `.env`, a username, and a password of at least 8 characters. Public signup is disabled after this setup.
-4. Configure **Accounts & cards**, including account/card suffixes, credit limits, repayment source accounts, Bank Fees, and categories available to merchant enrichment. Multiple cards can share one Actual account.
-5. Open **Tasker connection** and download the preconfigured `sms2actual.prj.xml`. Import it into Tasker and grant SMS permission. Its dedicated credential submits to `/api/v1`; existing `/v1` integrations continue to work.
-
-The workspace also includes:
-
-- **Overview:** balances for every open Actual account, the latest ten transactions across those accounts, message counts, and the last successful Tasker contact.
-- **SMS inbox:** search, server-side sorting, status filters, pagination, original SMS text, parser results, category support decisions, and audit history. Review an unimported message, choose its action/account/category, then approve it. Already imported or partially imported messages cannot be reimported through this form; correct those in Actual and use a merchant mapping or template for future messages.
-- **Merchants:** inspect and edit remembered payees and categories per account. History is consulted before requesting AI assistance.
-- **Message templates:** paste a reference SMS or start from an inbox message, read its parsed fields, replace changing values with `{amount}`, `{merchant}`, `{suffix}`, `{balance}`, `{fee}`, `{to}`, or `{date}`, and test the example before saving. `{amount}` is required, suffixes have 3–6 digits, and `{date}` should use an ISO date with time zone. Templates are scoped to a recognized bank sender and can be paused. Overlapping matches go to review. Existing shared grammar and bank-specific recognition templates remain visible.
-- **AI categorization:** configure OpenCode Go, OpenAI, or Anthropic API credentials, enter or load available model IDs, choose the confidence threshold, test a merchant, and inspect the latest 100 category support decisions. These integrations use provider APIs. Keys are encrypted at rest and never returned to the browser.
-- **Settings:** change your password, inspect/revoke browser sessions, and view the configured local Actual server address. The sms2actual server must be able to reach that address; the browser does not need access. Change the connection using `ACTUAL_SERVER_URL` in `.env` and recreate the service. Tasker credentials can be replaced independently of browser sessions.
-
-UI settings, custom templates, overrides, keys, and sessions persist in the existing SQLite data volume. YAML remains the initial seed and shared parser configuration; web edits do not rewrite read-only mounted files. Keep `AUTH_SECRET` stable if you set it. Otherwise a secret is derived from `API_KEY`, so changing that key invalidates sessions and makes previously encrypted keys unreadable. Back up the SQLite volume and your secret together. Credit limits are detected only when a matching credit-account message explicitly states a credit limit; available balance is not treated as a limit.
-
-For development, run `npm run build` once, then `npm run dev` to serve the frontend and API on port 3000. For frontend hot reload, run `npm run dev:web` alongside it and set `PUBLIC_URL=http://localhost:5173`; Vite proxies `/api` to Fastify. `npm run check` includes Svelte diagnostics and the complete backend test suite. For the isolated browser workflow check, install Chromium with `npx playwright install --with-deps chromium` and run `npm run test:web`; it uses in-memory SQLite and a fake Actual adapter, with no live service credentials. `npm run build` compiles both the service and frontend into `dist/`.
-
-## Get started
-
-### 1. Have these ready
-
-You'll need:
-
-- An Android phone with Tasker 6.6 and SMS permission.
-- A machine with Docker Compose, Node.js 22+, and npm.
-- An Actual Budget server running **26.9.0**, matching the API version bundled with this service.
-- A budget with the accounts and categories you want to use already created in Actual.
-- An HTTPS address your phone can reach, with a reverse proxy forwarding requests to this service.
-
-Have your Actual server URL, server password, and budget Sync ID ready. You can find the Sync ID in Actual under **Settings → Show advanced settings → Sync ID**. If your budget is encrypted, you'll also need its encryption password.
-
-> [!WARNING]
-> Keep the Actual server and this service's bundled API on matching versions. A mismatch logs a warning but may still allow startup, so a healthy service does not guarantee that imports will work. Follow [Upgrading Actual](#upgrading-actual) when updating your server.
-
-### 2. Run the setup wizard
-
-From this repository's directory, run:
+From a checkout of this repository:
 
 ```sh
-npm run setup
+docker compose up -d
 ```
 
-You don't need to run `npm install` on the host for Docker setup. This command builds the production image and runs the wizard in a temporary container, avoiding native SQLite dependency problems on the host.
+Open **http://localhost:3000** for a new installation. If this host already has a local Compose override, use its published port instead, such as **http://localhost:3002**. Run `docker compose ps` to check the address.
 
-The wizard connects to Actual, downloads your budget, and lets you choose from its open accounts and expense categories. Add only the banks and accounts you use. For each account, choose its bank and how to recognize it: the final digits shown in its SMS, the transaction type, or whether the message includes a balance. These identifiers come from your messages; they aren't Actual account IDs.
+Complete setup in the browser:
 
-Setup writes `.env` and `config/accounts.yaml`, and generates an API key for Tasker. Both files are private and gitignored. Existing files are left alone unless you explicitly run `npm run setup -- --force`.
+1. Set your workspace password (at least 8 characters). No username is needed.
+2. Enter your Actual server URL, server password, and budget Sync ID. Find the Sync ID in Actual under **Settings → Show advanced settings → Sync ID**. Enter the budget encryption password if enabled.
+3. In **Accounts & cards**, map existing Actual accounts to the bank and suffixes shown in your SMS. Choose an existing expense category for Bank Fees and save. The service never creates accounts or categories.
+4. In **Tasker connection**, enter an HTTPS service URL reachable by your phone, download the configured project, and import it into Tasker. Grant SMS permission, allow background activity, and run **Sync SMS Inbox To Actual Budget** once.
 
-Use an Actual server URL that both the setup container and the running service can reach. Inside Docker, `localhost` means the container itself. If your Actual hostname needs an explicit IP mapping, see [Docker networking](#docker-networking).
+No `.env`, account YAML, CLI wizard, or manually generated API key is required. The first Docker build can take a few minutes. Only the first owner can register. Existing owners sign in with their current password; usernames are no longer required. The default port is bound to loopback; complete owner setup before exposing the service remotely.
 
-The wizard gets its bank list from `config/banks.yaml`. If your bank isn't listed, [add it](#adding-a-bank) before running setup.
+Messages remain queued until Actual and account routing are configured. The web UI stays available if the saved Actual connection fails; use **Settings → Actual server connection** to reconnect or change credentials. A different budget after imports requires a separate instance so message deduplication and audit history remain tied to the original budget.
 
-The wizard also asks which account funds credit-card repayments when the SMS omits the funding account. Choose an existing open Actual account, or choose no default to record only the card credit.
+Tasker reads the last seven days of SMS on its first sync, then checks every five minutes. Check **SMS inbox** for imported messages or messages needing review. Repeated inbox syncs use stable identifiers to prevent duplicate imports.
 
-### 3. Start the service
+## Remote access and Docker networking
+
+The default browser origin is `http://localhost:3000`. For another origin, set `PUBLIC_URL` and, if needed, the host port or bind address. These are optional Compose settings; copy `.env.example` to `.env` or set them in your shell:
+
+```dotenv
+PUBLIC_URL=https://sms.example.com
+```
+
+Then recreate the service with `docker compose up -d`. Put HTTPS in front of the service using your reverse proxy or tunnel. Your phone needs access to sms2actual; the Actual server itself can stay private. `TRUSTED_ORIGINS` accepts additional exact browser origins separated by commas. Use only origins you control.
+
+| Setting           | Default                 | Purpose                                         |
+| ----------------- | ----------------------- | ----------------------------------------------- |
+| `PUBLIC_URL`      | `http://localhost:3000` | Main browser origin, including its port         |
+| `HOST_PORT`       | `3000`                  | Port published on the Docker host               |
+| `BIND_ADDRESS`    | `127.0.0.1`             | Host interface accepting connections            |
+| `TRUSTED_ORIGINS` | Empty                   | Additional browser origins, separated by commas |
+
+The service listens on port 3000 **inside the container**, even when `HOST_PORT` uses another number. If your main origin is already an HTTPS domain, keep `PUBLIC_URL` set to that domain and add any local browser addresses to `TRUSTED_ORIGINS`.
+
+### Port conflicts
+
+If another service already uses port 3000, choose a free host port and its matching browser origin:
 
 ```sh
-docker compose -f compose.example.yaml up --build -d
+HOST_PORT=3002 PUBLIC_URL=http://localhost:3002 docker compose up -d
 ```
 
-Check that it's ready:
+Save those values in `.env` to keep them for later runs:
 
-```sh
-curl --fail http://localhost:3000/readyz
+```dotenv
+HOST_PORT=3002
+PUBLIC_URL=http://localhost:3002
 ```
 
-The default Compose file binds port 3000 to the host's loopback address. Set up your HTTPS reverse proxy to forward requests to it. For a proxy running in Docker, see the [optional proxy network configuration](#docker-networking).
+Then use `docker compose up -d` as usual. Other services can continue using port 3000.
 
-The service checks your configured Actual account and category names at startup. They must match existing, open entries exactly. Missing or ambiguous names prevent the service from becoming ready; it never creates accounts or categories for you.
+### Local deployment overrides
 
-### 4. Connect Tasker
-
-Copy [`tasker/Actual_SMS_Inbox.prj.xml`](tasker/Actual_SMS_Inbox.prj.xml) to your phone. In Tasker, long-press the project tabs at the bottom, choose **Import Project**, and select the file.
-
-During import, enter:
-
-- **Actual SMS service URL:** this service's HTTPS base URL, with no trailing slash. Use the SMS service URL here, rather than the Actual server URL.
-- **Actual SMS API key:** the generated `API_KEY` from `.env`.
-
-If Tasker doesn't prompt, open the imported project's properties and set those two values there. Enable the imported profile, grant SMS permission, and apply Tasker's changes. Disable battery optimization for Tasker and allow it to run in the background.
-
-If you used the older immediate-forwarding project, disable or delete it before enabling this one. The current project requires a service version that supports `/v1/inbox-sync`.
-
-### 5. Check your first sync
-
-Run **Sync SMS Inbox To Actual Budget** manually once. The first sync reads the last seven days of messages; after that, Tasker checks every five minutes.
-
-View received events using the `X-API-Key` header, then check the imported transactions in Actual:
-
-```sh
-curl --fail \
-  -H 'X-API-Key: YOUR_API_KEY' \
-  https://sms.example.test/v1/events
-```
-
-Replace the example URL and key with your own. An event marked `needs_review` needs a closer look at `GET /v1/events/:id`; see [Event status and review](#event-status-and-review).
-
-If no events arrive, check Tasker's run log, SMS permission, project variables, and access to the HTTPS address. If events arrive but won't import, check the service logs and your Actual account/category names. Whenever you change the service URL or API key, update the project's values on your phone too.
-
-## Configuration
-
-The main configuration files are:
-
-| File                   | What it controls                                                              |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `.env`                 | Server connection, API keys, file paths, and runtime settings                 |
-| `config/accounts.yaml` | How SMS accounts map to your existing Actual accounts and categories          |
-| `config/banks.yaml`    | Bank IDs, sender names, and whether messages are imported or saved for review |
-| `config/parsing.yaml`  | Shared English/Arabic SMS recognition and optional message templates          |
-
-Restart the service after changing configuration. Keep `.env` and `config/accounts.yaml` private; the tracked examples contain made-up values.
-
-### Manual setup
-
-If you'd rather edit the files yourself, copy `.env.example` to `.env` and `config/accounts.example.yaml` to `config/accounts.yaml`. Replace all example names and suffixes with your own, and remove unused account entries. Account and category names must exactly match existing, open entries in Actual.
-
-Leave `OPENCODE_GO_API_KEY` empty to turn off AI suggestions. `ENRICHMENT_MIN_CONFIDENCE` defaults to `0.70`. `MAPPING_REFRESH_MINUTES` controls how often the service learns category changes you've made in Actual; the default is 60 minutes.
-
-You can also run the wizard with `npm run setup:host` if you've successfully installed the host dependencies, including Actual's native SQLite module.
-
-### Docker networking
-
-If Actual's hostname needs a specific IP address inside Docker, copy `compose.host-override.example.yaml` to `compose.host-override.yaml`, set `ACTUAL_HOSTNAME` and `ACTUAL_HOST_IP`, and include the file when starting the service:
-
-```sh
-docker compose -f compose.example.yaml -f compose.host-override.yaml up --build -d
-```
-
-The setup container accepts the same kind of mapping:
-
-```sh
-ACTUAL_SMS_ACTUAL_HOST=actual.example.test:10.0.0.5 npm run setup
-```
-
-To attach the service to an existing reverse-proxy network, copy `compose.proxy.example.yaml` to `compose.proxy.yaml`, set `PROXY_NETWORK` if needed, and include it with `-f compose.proxy.yaml`. Both local override files are gitignored. You can include both if your deployment needs them.
-
-### Account routing
-
-A single bank sender can send messages for several accounts. Routing rules tell the service which Actual account each message belongs to.
-
-Every rule names a `bank` and uses at least one of these matching options:
-
-| Option                        | Use it when…                                                |
-| ----------------------------- | ----------------------------------------------------------- |
-| `accountSuffixes`             | The SMS identifies an account or card by its final digits   |
-| `transactionKinds`            | The transaction type identifies the account                 |
-| `hasBalance: true` or `false` | The presence or absence of a balance distinguishes accounts |
-
-Rules must not overlap. For example, Al Rajhi credit-card messages with a numeric balance can route separately from checking messages without one.
-
-For transfers, `transferIdentifiers` optionally lists destination aliases. `billPaymentIdentifiers` maps biller codes to destination accounts. These options don't affect ordinary account matching, and transfer destinations can belong to any configured bank. If a bank identifies accounts in `From` and `To` fields, give each account its suffixes without transaction-type shortcuts so the service can match the source or destination correctly.
-
-Tasker always sends the full message, so account routing changes don't require changes on your phone.
-
-For credit-card repayment receipts that omit the funding account, set an optional default in `config/accounts.yaml`:
+An automatically loaded `compose.override.yaml` can hold host-specific ports, environment files, and network connections; it is gitignored. For example, to publish only port 3002:
 
 ```yaml
-creditCardPaymentFundingAccount: Checking - 0131
+services:
+  actual-sms:
+    environment:
+      PUBLIC_URL: http://localhost:3002
+    ports: !override
+      - '127.0.0.1:3002:3000'
 ```
 
-Use the exact existing, open Actual account name. The service credits the card and uses Actual's transfer payee to debit the funding account as a linked transfer. This default applies only to recognized card-repayment receipts; a funding account explicitly identified in the SMS takes priority. Ordinary deposits, refunds, and purchases do not use this default. The chosen funding account is saved with each payment, and changing the default affects future payments. Restart after editing the setting. Already imported card credits require linking in Actual rather than replaying the SMS.
+The `!override` tag replaces the base port list. Without it, Compose may publish both the original port and the additional port, leaving the conflict in place. Keep private hostnames and network names in the local override rather than the public base file.
 
-D360 uses `bank: d360` and the card suffix shown in the SMS. Set `actualName` to the exact name of your existing Actual account. For an international purchase such as `JPY 878.00 (SAR 20.91)`, the service imports the SAR equivalent plus any separately reported fee and keeps the foreign amount in the notes. It never treats a yen amount as SAR. Run **Reconcile Inbox Last 7 Days** after enabling D360 to pick up messages that were previously skipped.
+Plain `docker compose up -d` loads this override automatically. When supplying explicit `-f` arguments, include every override you need; Compose does not automatically add `compose.override.yaml` in that case. Inspect the final ports and networks with `docker compose config`, which can also contain private environment values.
 
-### Adding a bank
+### Connecting to Actual and a reverse proxy
 
-Add the bank to `config/banks.yaml`. This registry supplies the setup wizard's bank list and tells the service how to identify incoming senders. For example, add this entry under `banks`:
+The Actual server address must be reachable **from the container**. `localhost` refers to the sms2actual container. For Actual in another Compose project, attach sms2actual to that project's network in a local override. For a reverse-proxy network, use the provided example:
 
-```yaml
-- id: example-bank
-  name: Example Bank
-  senders: [ExampleBank, Example Bank]
-  disposition: import
+```sh
+cp compose.proxy.example.yaml compose.proxy.yaml
+PROXY_NETWORK=caddy docker compose -f compose.yaml -f compose.proxy.yaml up -d
 ```
 
-Then add a route under `accounts` in your local `config/accounts.yaml`. Use an existing Actual account name and the suffix shown in your SMS:
+For an explicit hostname/IP mapping, copy `compose.host-override.example.yaml` to `compose.host-override.yaml`, set `ACTUAL_HOSTNAME` and `ACTUAL_HOST_IP`, and include the override with `-f`. The base configuration has no dependency on private networks or hostnames.
 
-```yaml
-accounts:
-  - actualName: Example Checking
-    match:
-      bank: example-bank
-      accountSuffixes: ['1234']
+For LAN access without a proxy, set `BIND_ADDRESS` to the host's LAN IP, `PUBLIC_URL` to its exact HTTP origin, and optionally `HOST_PORT`. Use HTTPS for credentials outside a trusted local connection. Changing `HOST_PORT` also requires updating `PUBLIC_URL`.
+
+## Your web workspace
+
+- **Overview:** balances, recent transactions, message counts, and Tasker contact status. Refresh waits for Actual to sync, then reloads balances, transactions, and account/category details. It also refreshes automatically every 30 seconds. Date cutoffs use Riyadh time to include today's SMS transactions after midnight; a failed sync shows an error while keeping the previous overview visible.
+- **SMS inbox:** original messages, processing history, filters, and manual review. Correct already imported transactions in Actual.
+- **Accounts & cards:** account and card suffixes, transfer identifiers, credit limits, and default repayment accounts.
+- **Merchants and templates:** remember category corrections and teach unfamiliar message formats.
+- **AI categorization:** optional OpenCode Go, OpenAI, or Anthropic credentials and model settings. History is checked before AI is called.
+- **Tasker connection:** download the configured Android project, reveal its SMS key, or replace that credential.
+- **Settings:** Actual connection, password changes, and browser sessions.
+
+The Tasker key is separate from any optional legacy `.env` `API_KEY`. It can submit SMS and sync the inbox. Replacing it requires downloading and importing a new Tasker project. Normal UI setup does not need the legacy key.
+
+## Data, backups, and updates
+
+The `sms-data` volume stores the SQLite queue, audit history, web settings, encrypted credentials, and `runtime-secrets.json`. The `actual-cache` volume stores Actual's downloaded budget. Keep the data volume and its secrets together when backing up or restoring. Existing environment-based installations must also retain their original `API_KEY` and any explicit `AUTH_SECRET`. Keep the same Compose project name when upgrading so Compose reuses the existing volumes. The image runs as the non-root `node` user.
+
+```sh
+docker compose logs --tail=100 actual-sms
+docker compose ps
 ```
 
-Sender aliases match the whole sender name, ignoring case and extra whitespace. They are literal names, so list each spelling your phone receives; regexes and partial matches aren't supported.
+Check readiness at `/readyz` using the published host port, for example:
 
-For older requests that omit the sender, optional `messageAliases` can identify the bank from the message text. These matches require word boundaries. If a message matches more than one bank, it's saved for review.
-
-`disposition` defaults to `import`. Set it to `needs_review` to save a bank's messages without importing them. Review-only banks aren't offered in setup and can't have account routes.
-
-Choose a stable bank ID beginning with a lowercase letter and containing only lowercase letters, digits, underscores, or hyphens. Routing and transaction deduplication depend on these IDs. Startup rejects duplicate IDs or aliases, unknown bank IDs in account routes, and routes for review-only banks.
-
-If the bank's wording already fits the shared English/Arabic rules, YAML changes are all you need. For different wording or field labels, add a [custom SMS template](#custom-sms-templates). Messages from registered import banks that can't be understood are saved for review.
-
-Restart after editing the files, then run **Reconcile Inbox Last 7 Days** to recover recent messages from the newly supported sender. Changing bank configuration alone does not retry events already saved for review.
-
-Compose mounts the registry at `/config/banks.yaml`. Older deployments need to add that mount; existing account mappings don't need to change. To use another location, mount the file there and set `BANKS_CONFIG_PATH`. For host development, use `BANKS_CONFIG_PATH=config/banks.yaml`. Setup reads the repository's registry by default.
-
-### Custom SMS templates
-
-All banks share one parser engine and a set of English/Arabic rules in `config/parsing.yaml`. Bank identification is a separate step used for routing. The parser reads transaction details; routing and processing handle account matching and transfers between your own accounts.
-
-You can add a template when a bank uses wording the shared rules don't recognize. Add it under `templates` in `config/parsing.yaml`, then reference its ID on the bank entry in `config/banks.yaml` with `templates: [example-purchase]`.
-
-Mark an incoming card-repayment template with `kind: transfer_in` and `cardPaymentReceived: true` to allow the configured funding-account default. The same marker is supported on shared incoming-kind rules. Other transaction kinds cannot use this marker.
-
-For example:
-
-```yaml
-- id: example-purchase
-  match:
-    - source: 'Statement debit'
-      flags: i
-  kind: purchase
-  fields:
-    principal:
-      - source: 'Paid SAR (?<value>[0-9.]+)'
-        flags: u
-  required: [principal, accountAlias]
+```sh
+curl --fail http://localhost:3002/readyz
 ```
 
-This recognizes a purchase containing `Statement debit` and extracts its amount from `Paid SAR …`. It uses the shared account extractor and requires both an amount and an account alias.
+Use port 3000 instead for an unmodified fresh installation. `/healthz` and `/readyz` check the web service. Actual connection and import readiness are shown in the workspace. A healthy container may still need initial setup or an Actual reconnection.
 
-Templates work as follows:
+To update after pulling repository changes:
 
-- Patterns run after Arabic digits are converted, thousands separators are removed, and whitespace is collapsed.
-- Use single-quoted YAML regex strings to preserve backslashes. Flags can include `i`, `m`, `s`, and `u`, each once. The engine handles repeated matching.
-- Scalar field patterns must capture `value`. The `foreign` field captures `amount` and `currency`.
-- Pattern lists run in order. Keep specific transaction kinds, such as card payments and transfers, before generic purchases in the shared rules.
-- Fields you leave out use the shared extractors. If you override a field and its pattern doesn't match, that field stays absent.
+```sh
+docker compose up -d --build
+```
 
-Supported fields are `accountAlias`, `accountAliases`, `from`, `to`, `iban`, `beneficiary`, `biller`, `merchant`, `principal`, `total`, `fee`, `balance`, `foreign`, `date`, `sarEquivalent`, and the boolean marker `cashback`. Amount fields describe SAR amounts; foreign amounts are stored separately. Dates use the supported formats and Riyadh timezone, falling back to the time the SMS was received. YAML templates can't run custom conversion code or accounting formulas.
+The `--build` flag matters after source changes: plain `docker compose up -d` can reuse an older image. If startup complains about required Actual environment variables after upgrading to web setup, rebuild the image first. Existing deployments should keep their local environment file, volume mappings, and network overrides during the upgrade; see the migration guide below.
 
-Ignored notifications and review-only banks are handled before template matching. With exactly one matching template, the service uses its transaction kind and field overrides. With none, it uses the shared rules. Missing or invalid required fields send the message to `needs_review`; multiple matching templates do the same with reason `ambiguous_template`. Purchase, refund, transfer, and fee accounting stays in the shared engine.
+`docker compose down` keeps your data. **`docker compose down -v` deletes the volumes**, including credentials and message history.
 
-Test new templates against both messages they should match and messages they shouldn't. Restart after edits, and deploy bank and parser configuration together. Setup and startup validate the parser configuration and bank template references. Invalid versions, fields, flags, regexes, captures, or references are rejected.
-
-Compose mounts this file at `/config/parsing.yaml`; older deployments need to add the mount. `PARSING_CONFIG_PATH` can select another mounted location. For host development, use `PARSING_CONFIG_PATH=config/parsing.yaml`.
-
-The current parser revision is 15, which includes account-reference and transfer-identity fixes. A parser revision can trigger [reprocessing of older events](#event-status-and-review), but editing YAML alone doesn't trigger a historical replay. Imported events are never replayed.
-
-## Event status and review
-
-Use `GET /v1/events` to see what's been received and `GET /v1/events/:id` to inspect a particular message. Both require the `X-API-Key` header.
-
-| Status            | Meaning                                                          |
-| ----------------- | ---------------------------------------------------------------- |
-| `queued`          | Saved and waiting to be processed                                |
-| `processing`      | Currently being processed                                        |
-| `imported`        | Imported into Actual                                             |
-| `imported_review` | Imported, but needs your attention                               |
-| `ignored`         | Recognized as a notification that shouldn't create a transaction |
-| `needs_review`    | Saved for inspection without creating a transaction              |
-| `failed`          | Processing failed; details remain available                      |
-
-OTP, login, declined, and insufficient-funds notifications are intentionally ignored. Unrecognized or malformed messages from registered banks, along with messages from review-only banks, are saved as `needs_review`. They don't retry within the same parser revision.
-
-The event list has cursor pagination and optional `status`, `enrichmentStatus`, `from`, and `to` filters. Event details include the original input, status history, enrichment attempts, the source of merchant/category mappings, `parserReason`, and operational `error` values. Raw SMS and location are available only in the authenticated detail response.
-
-Processing retries wait 1 minute, 5 minutes, 30 minutes, and 2 hours. Events remain available to inspect after a terminal error.
-
-When a new parser revision starts, it gives retained `ignored` and `needs_review` events from earlier revisions one more attempt. This allows a parser fix to recover a missed transaction. Already imported events are never replayed, and Actual's stable import IDs prevent duplicates.
-
-## How inbox sync works
-
-The Tasker project reads Android's SMS inbox (`content://sms/inbox`) every five minutes. It resumes from a checkpoint stored on the server, so it can catch up after Tasker stops or the phone loses connectivity. On first use, the checkpoint starts seven days in the past.
-
-The service supports one active inbox-sync phone. Disable the old phone's project before moving to another one. The old `%ActualSmsInboxV2*` Tasker globals are no longer used and can be deleted.
-
-Every SMS after the checkpoint passes through your private HTTPS service. The service checks the sender against `config/banks.yaml`, queues supported bank messages, and saves review-only bank messages for inspection. Unknown senders and empty messages are skipped without storing their content. Polling uses the inbox `date` as `receivedAt` and doesn't include location.
-
-### Recheck the last seven days
-
-Run **Reconcile Inbox Last 7 Days** when you've enabled a bank or want to resend recent inbox messages. Wait for any active sync to finish first.
-
-The task moves the server checkpoint to seven days ago, and the next poll works through that window again. Existing event IDs prevent duplicate imports. If the checkpoint is already farther back, reconciliation leaves it there. Resending an event already saved for review doesn't automatically reprocess it after a configuration change.
-
-### Protocol details
-
-Each Tasker run calls `POST /v1/inbox-sync/start` to get the checkpoint, reads all later inbox rows without filtering senders, and sends the oldest first to `POST /v1/inbox-sync/batch`. Batches contain up to 25 rows; one run sends at most 10 batches, or 250 messages. The next poll continues from there.
-
-The checkpoint tracks the inbox row's `(date, _id)`. Tasker sends these identifier fields as received from Android. The server normalizes and validates them, then saves events and advances the checkpoint in the same SQLite transaction. Event IDs use `inbox-v2-<date>-<row _id>`, which also prevents duplicates when replaying messages during migration.
-
-Each batch includes the checkpoint Tasker expects. If another run or a rewind has changed it, the server returns `409 checkpoint_conflict`. Tasker stops and gets the current checkpoint next time. Network failures don't need local recovery: if the server committed the batch, the next start call returns the advanced checkpoint; otherwise, it returns the previous one.
-
-Valid rows are acknowledged as `empty`, `unsupported`, `duplicate`, or `queued`. Each advances the checkpoint. The sync route has a 5 MiB body limit and accepts at most 25 rows per batch.
-
-The Tasker SQL query uses `|~sms~|` as its column divider. The server also accepts unsplit comma-separated rows from older imports that lost their tab divider, preserving commas and newlines within message bodies.
-
-## Merchant names, categories, and privacy
-
-Before asking AI for help, the service looks for an exact match on the normalized merchant name and Actual account. It learns these mappings from categorized Actual transactions, your manual corrections, and successful SMS enrichments. Actual history refreshes at startup and every hour by default. A match reuses the previous payee and category without an AI request; any active expense category can be reused.
-
-If there's no match and you've configured `OPENCODE_GO_API_KEY`, the service asks OpenCode Go for a merchant name and category suggestion. It sends only normalized merchant text, optional exact location/time context, and the configured eligible category IDs and names. It doesn't send raw SMS, balances, account suffixes, aliases, or unrelated personal data.
-
-The default model is `deepseek-v4.1-flash`; change it with `OPENCODE_GO_MODEL`. Requests use OpenCode's OpenAI-compatible Chat Completions endpoint with a JSON-only prompt, and responses are validated locally. The provider's JSON-mode parameter is omitted because the current Flash backend rejects it. This step uses the model without web search.
-
-A category is applied only when confidence meets `ENRICHMENT_MIN_CONFIDENCE`, which defaults to `0.70`. A lower-confidence suggestion may still clean up the payee name. Provider failures, invalid output, quota limits, rate limits, and timeouts don't prevent an otherwise valid transaction from importing. Sanitized requests, responses, timings, outcomes, and failure details are saved in the event audit.
-
-### What stays on your server
-
-The SQLite database keeps raw SMS, any supplied location, status changes, mapping decisions, enrichment attempts, and import outcomes indefinitely for authenticated review. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.
-
-### What gets imported
-
-Actual's rules remain authoritative. Transactions are imported as cleared, use a stable `imported_id` to prevent duplicates, and sync after writes. Actual's default behavior of not reimporting deleted entries is preserved.
-
-For foreign-currency messages without a SAR amount, the service uses chronological balance changes when it can do so safely. Otherwise, it imports a zero-value transaction marked `REVIEW REQUIRED`.
+- [Advanced configuration, bank grammar, and existing deployment migration](docs/configuration.md)
+- [Processing, inbox sync, event statuses, and privacy](docs/processing.md)
 
 ## Development
 
-Install dependencies, then run the full check:
+Use Node.js 22 or newer:
 
 ```sh
-npm install
+npm ci
 npm run check
+npm run build
+DB_PATH=./data/events.sqlite ACTUAL_CACHE_DIR=./actual-cache npm run dev
 ```
 
-Normal tests don't contact Actual or OpenCode and need no services or environment variables. `npm run check` runs formatting, lint, type checking, and tests in that order. Run it before considering a change complete; this repository has no CI to run it for you.
+The backend serves the built web UI. For frontend hot reload, run `npm run dev:web` alongside it with `PUBLIC_URL=http://localhost:5173` on the backend. `npm run check` runs formatting, lint, TypeScript/Svelte checks, and tests in order. Normal tests use isolated fixtures and contact no live services.
 
-Useful commands:
-
-| Command                              | Purpose                                             |
-| ------------------------------------ | --------------------------------------------------- |
-| `npm run dev`                        | Run with automatic reload through tsx               |
-| `npm run build`                      | Compile to `dist/src/main.js`                       |
-| `npm start`                          | Run the compiled service                            |
-| `npm test`                           | Run the regular tests                               |
-| `npx vitest run test/parser.test.ts` | Run one test file; add `-t 'name'` to select a test |
-| `npm run typecheck`                  | Check TypeScript types                              |
-| `npm run format`                     | Apply Prettier formatting                           |
-| `npm run lint:fix`                   | Apply safe ESLint fixes                             |
-
-The service uses Fastify and runs on Node 22 in the production image. The container runs as the non-root `node` user, with writable `/data` and `/actual-cache` mounts.
+For browser checks, install Chromium and its system dependencies with `npx playwright install --with-deps chromium`, then run `npm run test:web`. It uses in-memory SQLite and a fake Actual adapter. The production build outputs `dist/src/main.js` and `dist/web`.
 
 ### Disposable Actual smoke test
 
@@ -376,7 +175,7 @@ To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TES
 
 ### Upgrading Actual
 
-The `@actual-app/api` dependency is pinned to **26.9.0** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures do prevent startup.
+The `@actual-app/api` dependency is pinned to **26.9.0** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures pause imports; the web workspace stays available to fix the connection.
 
 When upgrading:
 

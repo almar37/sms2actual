@@ -1,4 +1,5 @@
 import { loadActualApi } from './actual-sdk.js';
+import { currentBudgetDate } from './budget-date.js';
 import type { ActualAdapter, ActualTransaction } from './types.js';
 
 export class ActualApiAdapter implements ActualAdapter {
@@ -40,9 +41,11 @@ export class ActualApiAdapter implements ActualAdapter {
       .filter((a) => !a.closed)
       .map((a) => ({ id: a.id, name: a.name }));
   }
-  async accountBalance(accountId: string) {
+  async accountBalance(accountId: string, throughDate = currentBudgetDate()) {
     const actual = await loadActualApi();
-    return actual.getAccountBalance(accountId);
+    // The SDK extracts the host-local calendar day from its Date cutoff.
+    // Construct that day explicitly so UTC hosts include today's Riyadh transactions.
+    return actual.getAccountBalance(accountId, new Date(`${throughDate}T00:00:00`));
   }
   async categories() {
     const actual = await loadActualApi();

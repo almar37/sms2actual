@@ -1,4 +1,4 @@
-# Run on the Docker host that runs Actual and cloudflared.
+# Legacy deployment example. For new installations use compose.yaml with overrides.
 # Cloudflare published application: https://<sms-hostname> -> http://actual-sms:3000
 services:
   actual-sms:
@@ -36,7 +36,7 @@ volumes:
 networks:
   actual:
     external: true
-    name: ${ACTUAL_NETWORK:-shared-net}
+    name: ${ACTUAL_NETWORK:?set ACTUAL_NETWORK to your existing Actual network}
   tunnel:
     external: true
-    name: ${TUNNEL_NETWORK:-streaming_flare-net}
+    name: ${TUNNEL_NETWORK:?set TUNNEL_NETWORK to your existing tunnel network}

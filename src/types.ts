@@ -141,7 +141,7 @@ export interface ActualAdapter {
   sync(): Promise<void>;
   accounts(): Promise<{ id: string; name: string }[]>;
   categories(): Promise<ActualCategory[]>;
-  accountBalance?(accountId: string): Promise<number>;
+  accountBalance?(accountId: string, throughDate?: string): Promise<number>;
   transactions(
     accountId: string,
     startDate: string,

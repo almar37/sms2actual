@@ -9,13 +9,14 @@
   import Templates from './Templates.svelte';
   import AiSettings from './AiSettings.svelte';
   import Settings from './Settings.svelte';
+  import ActualConnection from './ActualConnection.svelte';
   let loading = $state(true),
     signedIn = $state(false),
     setup = $state(false),
+    requiresApiKey = $state(true),
     busy = $state(false),
     error = $state('');
-  let username = $state(''),
-    password = $state(''),
+  let password = $state(''),
     apiKey = $state('');
   let page = $state(location.hash.slice(1) || 'overview'),
     catalog = $state<any>(null),
@@ -56,6 +57,7 @@
     try {
       const status = await api('/api/console/setup');
       setup = status.needsSetup;
+      requiresApiKey = status.requiresApiKey !== false;
       if (!setup) {
         const session = await api('/api/auth/get-session');
         signedIn = Boolean(session?.user);
@@ -73,11 +75,11 @@
     error = '';
     try {
       if (setup) {
-        await api('/api/console/setup', { username, password, apiKey });
+        await api('/api/console/setup', { password, apiKey });
         setup = false;
         apiKey = '';
       }
-      await api('/api/auth/sign-in/username', { username, password });
+      await api('/api/auth/sign-in/password', { password });
       signedIn = true;
       password = '';
       await refreshCatalog();
@@ -101,10 +103,14 @@
       signedIn = false;
     });
     void initialize();
+    const connectionTimer = setInterval(() => {
+      if (signedIn && catalog?.connection?.connecting) void refreshCatalog().catch(() => {});
+    }, 2000);
     const hash = () => (page = location.hash.slice(1) || 'overview');
     window.addEventListener('hashchange', hash);
     return () => {
       clearTimeout(toastTimer);
+      clearInterval(connectionTimer);
       window.removeEventListener('hashchange', hash);
     };
   });
@@ -137,21 +143,10 @@
       <h1>{setup ? 'Make yourself at home.' : 'Welcome back.'}</h1>
       <p class="muted">
         {setup
-          ? 'Create your private workspace for simpler SMS banking.'
-          : 'Sign in to your sms2actual workspace.'}
+          ? 'Choose a password for your private workspace.'
+          : 'Enter your password to open your workspace.'}
       </p>
       {#if error}<div class="error" role="alert">{error}</div>{/if}
-      <label
-        >Username<input
-          type="text"
-          bind:value={username}
-          autocapitalize="none"
-          spellcheck={false}
-          maxlength="64"
-          autocomplete="username"
-          required
-        /></label
-      >
       <label
         >Password<input
           type="password"
@@ -162,7 +157,7 @@
           required
         /></label
       >
-      {#if setup}<label
+      {#if setup && requiresApiKey}<label
           >API key<input type="password" bind:value={apiKey} autocomplete="off" required /><small
             >The API_KEY in your service’s .env file. Used once to create the owner.</small
           ></label
@@ -189,7 +184,13 @@
       >
       <div class="workspace-label">
         <span class="workspace-avatar">P</span>
-        <div>Personal workspace<small>Actual Budget connected</small></div>
+        <div>
+          Personal workspace<small
+            >{catalog?.connection?.connected === false
+              ? 'Setup in progress'
+              : 'Actual Budget connected'}</small
+          >
+        </div>
         <span class="connection-dot"></span>
       </div>
       <div class="nav-caption">WORKSPACE</div>
@@ -252,13 +253,43 @@
             >
           </div>{/if}
         {#if catalog}
-          {#if page === 'overview'}<Overview {catalog} {navigate} {notify} />
-          {:else if page === 'sms'}<SmsLog {catalog} {notify} {navigate} />
-          {:else if page === 'accounts'}<Accounts {catalog} {notify} refresh={refreshCatalog} />
-          {:else if page === 'merchants'}<Merchants {catalog} {notify} />
-          {:else if page === 'templates'}<Templates {catalog} {notify} />
-          {:else if page === 'ai'}<AiSettings {catalog} {notify} />
-          {:else}<Settings {catalog} {notify} tasker={page === 'tasker'} />{/if}
+          {#if catalog.connection && !catalog.connection.connected}
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">LET’S CONNECT YOUR BUDGET</span>
+                <h1>Welcome to your workspace<span class="green">.</span></h1>
+                <p>Connect Actual, map your accounts, then download your Tasker project.</p>
+              </div>
+            </div>
+            <ActualConnection {catalog} {notify} refresh={refreshCatalog} />
+            <button onclick={() => refreshCatalog().catch((e) => (error = e.message))}
+              >Refresh connection status</button
+            >
+          {:else}
+            {#if catalog.connection && !catalog.connection.ready}<div class="info-box">
+                Your budget is connected. Choose an account and a Bank Fees category in <button
+                  class="text-button"
+                  onclick={() => navigate('accounts')}>Accounts &amp; cards</button
+                > to start importing. Messages stay queued until setup is complete.
+              </div>{/if}
+            {#if page === 'overview'}<Overview
+                {catalog}
+                {navigate}
+                {notify}
+                refresh={refreshCatalog}
+              />
+            {:else if page === 'sms'}<SmsLog {catalog} {notify} {navigate} />
+            {:else if page === 'accounts'}<Accounts {catalog} {notify} refresh={refreshCatalog} />
+            {:else if page === 'merchants'}<Merchants {catalog} {notify} />
+            {:else if page === 'templates'}<Templates {catalog} {notify} />
+            {:else if page === 'ai'}<AiSettings {catalog} {notify} />
+            {:else}<Settings
+                {catalog}
+                {notify}
+                refresh={refreshCatalog}
+                tasker={page === 'tasker'}
+              />{/if}
+          {/if}
         {:else}<div class="empty">
             <Icon name="refresh" size={32} />
             <h2>Connecting to your budget</h2>

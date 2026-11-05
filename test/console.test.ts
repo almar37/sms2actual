@@ -9,16 +9,18 @@ import {
 import { createConsoleAuth } from '../src/console-auth.js';
 import { buildServer } from '../src/server.js';
 import { Processor } from '../src/processor.js';
+import { ActualConnection } from '../src/actual-connection.js';
 import { NoopEnricher } from '../src/enricher.js';
 import { ConfigurableEnricher } from '../src/provider-enricher.js';
 import { generateTaskerProject } from '../src/tasker-export.js';
-import type { ActualAdapter, ResolvedConfig } from '../src/types.js';
+import type { ActualAdapter, HistoricalTransaction, ResolvedConfig } from '../src/types.js';
 import { banks, parsing } from './fixtures/banks.js';
 
 const stores: EventStore[] = [];
 afterEach(() => {
   for (const store of stores) store.close();
   stores.length = 0;
+  vi.useRealTimers();
 });
 const origin = 'http://localhost:3000';
 const apiKey = 'test-bootstrap-key-with-enough-entropy';
@@ -81,8 +83,27 @@ function fixture() {
   const processor = new Processor(store, actual, ai, config, 5, 0.7, undefined, settings);
   return { store, settings, actual, config, processor, ai, imports };
 }
-async function server(signedIn = true, trustedOrigins: string[] = []) {
+async function server(signedIn = true, trustedOrigins: string[] = [], onboarding = false) {
   const f = fixture();
+  const connection = onboarding
+    ? new ActualConnection(f.settings, f.config, '/unused', undefined, undefined, () => f.actual)
+    : undefined;
+  if (connection) {
+    f.config.accounts = [];
+    f.config.bankFeesCategoryId = '';
+    f.config.eligibleCategories = [];
+    f.processor = new Processor(
+      f.store,
+      connection,
+      f.ai,
+      f.config,
+      5,
+      0.7,
+      undefined,
+      f.settings,
+      () => connection.canProcess(),
+    );
+  }
   const auth = await createConsoleAuth(
     f.store,
     origin,
@@ -98,7 +119,10 @@ async function server(signedIn = true, trustedOrigins: string[] = []) {
     console: {
       auth,
       settings: f.settings,
-      actual: f.actual,
+      actual: connection ?? f.actual,
+      connection,
+      requireSetupKey: !onboarding,
+      onRoutingChanged: connection ? () => f.processor.refreshMappings() : undefined,
       config: f.config,
       publicUrl: origin,
       trustedOrigins,
@@ -112,7 +136,6 @@ async function server(signedIn = true, trustedOrigins: string[] = []) {
       url: '/api/console/setup',
       headers: { origin },
       payload: {
-        username: 'owner',
         password: 'testpass',
         apiKey,
       },
@@ -120,17 +143,133 @@ async function server(signedIn = true, trustedOrigins: string[] = []) {
     expect(setup.statusCode, setup.body).toBe(200);
     const login = await app.inject({
       method: 'POST',
-      url: '/api/auth/sign-in/username',
+      url: '/api/auth/sign-in/password',
       headers: { origin },
-      payload: { username: 'owner', password: 'testpass' },
+      payload: { password: 'testpass' },
     });
     expect(login.statusCode, login.body).toBe(200);
     cookie = login.cookies.map((c) => `${c.name}=${c.value}`).join('; ');
     expect(cookie).toContain('session_token');
   }
   const headers = { origin, cookie };
-  return { ...f, app, headers };
+  return { ...f, app, headers, connection };
 }
+
+describe('web onboarding', () => {
+  it('creates an owner and connects Actual without environment keys or YAML, then processes after account setup', async () => {
+    const { app, store, processor, imports, connection } = await server(false, [], true);
+    expect((await app.inject('/api/console/setup')).json()).toEqual({
+      needsSetup: true,
+      requiresApiKey: false,
+    });
+    expect((await app.inject('/readyz')).statusCode).toBe(200);
+    const setup = await app.inject({
+      method: 'POST',
+      url: '/api/console/setup',
+      headers: { origin },
+      payload: { password: 'testpass' },
+    });
+    expect(setup.statusCode, setup.body).toBe(200);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/setup',
+          headers: { origin },
+          payload: { password: 'testpass' },
+        })
+      ).statusCode,
+    ).toBe(409);
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/password',
+      headers: { origin },
+      payload: { password: 'testpass' },
+    });
+    const headers = { origin, cookie: login.cookies.map((c) => `${c.name}=${c.value}`).join('; ') };
+    const initial = await app.inject({ url: '/api/console/settings', headers });
+    expect(initial.statusCode, initial.body).toBe(200);
+    expect(initial.json()).toMatchObject({
+      accounts: [],
+      connection: { connected: false, ready: false },
+    });
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: 'SAB purchase Card **1234 Amount SAR 1 at Example',
+      receivedAt: now,
+    });
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({ status: 'queued', attempts: 0 });
+    const connected = await app.inject({
+      method: 'POST',
+      url: '/api/console/actual',
+      headers,
+      payload: {
+        serverURL: 'http://actual:5006',
+        password: 'actual-secret',
+        syncId: 'budget-id',
+        encryptionPassword: 'budget-secret',
+      },
+    });
+    expect(connected.statusCode, connected.body).toBe(200);
+    expect(connected.json()).toMatchObject({ connected: true, ready: false });
+    expect(connected.body).not.toContain('actual-secret');
+    expect(connected.body).not.toContain('budget-secret');
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('queued');
+    const saved = await app.inject({
+      method: 'PUT',
+      url: '/api/console/settings',
+      headers,
+      payload: {
+        accounts: [
+          {
+            id: 'checking',
+            name: 'Current',
+            type: 'checking',
+            match: { bank: 'sab', accountSuffixes: ['1234'] },
+            cards: [],
+          },
+        ],
+        bankFeesCategoryId: 'fees',
+        eligibleCategoryIds: ['food'],
+      },
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect(connection!.canProcess()).toBe(true);
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('imported');
+    expect(imports).toHaveBeenCalledWith('checking', [
+      expect.objectContaining({ amount: -100, category: 'food' }),
+    ]);
+    await app.close();
+  });
+  it('protects connection endpoints and rejects invalid connection details', async () => {
+    const { app, headers } = await server(true, [], true);
+    expect((await app.inject({ url: '/api/console/actual' })).statusCode).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/actual',
+          headers: { cookie: headers.cookie, origin: 'https://evil.test' },
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/actual',
+          headers,
+          payload: { serverURL: 'file:///etc/passwd', password: 'secret', syncId: 'id' },
+        })
+      ).statusCode,
+    ).toBe(400);
+    await app.close();
+  });
+});
 
 describe('console access and APIs', () => {
   it('requires browser sessions and forbids public signup and cross-origin owner setup', async () => {
@@ -168,7 +307,6 @@ describe('console access and APIs', () => {
           url: '/api/console/setup',
           headers: { origin },
           payload: {
-            username: 'owner',
             password: 'testpass',
             apiKey: 'wrong',
           },
@@ -312,6 +450,90 @@ describe('console access and APIs', () => {
     expect(summary.accounts).toHaveLength(2);
     expect(summary.accounts[0].balanceCents).toBe(50000);
     expect(summary.transactions).toHaveLength(2);
+    await app.close();
+  });
+  it('refreshes from Actual before reading balances and includes new transactions after Riyadh midnight', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-05T21:01:00Z'));
+    const { app, headers, actual } = await server();
+    let remote: HistoricalTransaction[] = [
+      { id: 'old', accountId: 'checking', date: '2026-11-05', amount: 50000 },
+    ];
+    let local = [...remote];
+    let waitForSync = Promise.resolve();
+    let syncStarted = () => {};
+    const sync = vi.spyOn(actual, 'sync').mockImplementation(async () => {
+      syncStarted();
+      await waitForSync;
+      local = structuredClone(remote);
+    });
+    const balances = vi.fn<NonNullable<ActualAdapter['accountBalance']>>(
+      async (id, throughDate = '') =>
+        local
+          .filter((tx) => tx.accountId === id && tx.date <= throughDate)
+          .reduce((sum, tx) => sum + (tx.amount ?? 0), 0),
+    );
+    actual.accountBalance = balances;
+    const transactions = vi
+      .spyOn(actual, 'transactions')
+      .mockImplementation(async (id, start, end) =>
+        local.filter((tx) => tx.accountId === id && tx.date >= start && tx.date <= end),
+      );
+    try {
+      const initial = await app.inject({ url: '/api/console/summary', headers });
+      expect(initial.json().accounts[0].balanceCents).toBe(50000);
+      remote = [
+        { ...remote[0]!, amount: 60000 },
+        {
+          id: 'new',
+          accountId: 'checking',
+          date: '2026-11-06',
+          amount: -100,
+          payeeName: 'New in Actual',
+        },
+      ];
+      balances.mockClear();
+      transactions.mockClear();
+      let release!: () => void;
+      waitForSync = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        syncStarted = resolve;
+      });
+      const pending = app
+        .inject({ url: '/api/console/summary', headers })
+        .then((response) => response);
+      await started;
+      expect(balances).not.toHaveBeenCalled();
+      expect(transactions).not.toHaveBeenCalled();
+      release();
+      const refreshed = await pending;
+      expect(refreshed.statusCode, refreshed.body).toBe(200);
+      expect(refreshed.headers['cache-control']).toBe('no-store');
+      expect(refreshed.json().accounts[0].balanceCents).toBe(59900);
+      expect(refreshed.json().transactions[0]).toMatchObject({
+        id: 'new',
+        date: '2026-11-06',
+        payeeName: 'New in Actual',
+      });
+      expect(sync).toHaveBeenCalledTimes(2);
+      expect(balances).toHaveBeenCalledWith('checking', '2026-11-06');
+      expect(transactions).toHaveBeenCalledWith('checking', '1900-01-01', '2026-11-06', 10);
+    } finally {
+      await app.close();
+    }
+  });
+  it('reports sync failures instead of returning an outdated overview as a successful refresh', async () => {
+    const { app, headers, actual } = await server();
+    vi.spyOn(actual, 'sync').mockRejectedValue(new Error('Actual unavailable'));
+    const balances = vi.spyOn(actual, 'accountBalance');
+    const transactions = vi.spyOn(actual, 'transactions');
+    const response = await app.inject({ url: '/api/console/summary', headers });
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error).toContain('Could not refresh from Actual');
+    expect(balances).not.toHaveBeenCalled();
+    expect(transactions).not.toHaveBeenCalled();
     await app.close();
   });
   it('uses a reviewed deposit category during processing and blocks reimport of imported messages', async () => {
@@ -718,9 +940,9 @@ describe('explicit additional console origins', () => {
     const { app } = await server(true, [tailnetOrigin]);
     const login = await app.inject({
       method: 'POST',
-      url: '/api/auth/sign-in/username',
+      url: '/api/auth/sign-in/password',
       headers: { origin: tailnetOrigin, host: '100.120.220.101:3002' },
-      payload: { username: 'owner', password: 'testpass' },
+      payload: { password: 'testpass' },
     });
     expect(login.statusCode, login.body).toBe(200);
     const cookie = login.cookies.map((c) => `${c.name}=${c.value}`).join('; ');
@@ -746,14 +968,14 @@ describe('explicit additional console origins', () => {
   });
 });
 
-describe('username and eight-character passwords', () => {
+describe('password-only owner access', () => {
   it('rejects short passwords and missing API keys without creating an owner', async () => {
     const { app, store } = await server(false);
     const short = await app.inject({
       method: 'POST',
       url: '/api/console/setup',
       headers: { origin },
-      payload: { username: 'admin', password: '1234567', apiKey },
+      payload: { password: '1234567', apiKey },
     });
     expect(short.statusCode).toBe(400);
     expect(short.json().error).toContain('8 characters');
@@ -763,13 +985,73 @@ describe('username and eight-character passwords', () => {
           method: 'POST',
           url: '/api/console/setup',
           headers: { origin },
-          payload: { username: 'admin', password: 'testpass' },
+          payload: { password: 'testpass' },
         })
       ).statusCode,
     ).toBe(400);
     expect(
       (store.db.prepare('SELECT COUNT(*) count FROM user').get() as { count: number }).count,
     ).toBe(0);
+    await app.close();
+  });
+  it('requires the correct password and rejects caller-selected identities and legacy sign-in routes', async () => {
+    const { app } = await server();
+    const wrong = await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/password',
+      headers: { origin },
+      payload: { password: 'wrongpass' },
+    });
+    expect(wrong.statusCode).toBe(401);
+    expect(wrong.cookies).toEqual([]);
+    for (const identity of [{ username: 'owner' }, { email: 'owner@example.com' }]) {
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/auth/sign-in/password',
+            headers: { origin },
+            payload: { password: 'testpass', ...identity },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    for (const path of ['username', 'email']) {
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/auth/sign-in/${path}`,
+            headers: { origin },
+            payload: { password: 'testpass' },
+          })
+        ).statusCode,
+      ).toBe(404);
+    }
+    await app.close();
+  });
+  it('limits repeated password attempts even with changing forwarded IP headers', async () => {
+    const { app } = await server();
+    let limited = false;
+    for (let attempt = 0; attempt < 21; attempt++) {
+      const result = await app.inject({
+        method: 'POST',
+        url: '/api/auth/sign-in/password',
+        headers: {
+          origin,
+          'x-forwarded-for': `192.0.2.${attempt}`,
+          'x-real-ip': `192.0.2.${attempt}`,
+          'cf-connecting-ip': `192.0.2.${attempt}`,
+        },
+        payload: { password: 'wrongpass' },
+      });
+      if (result.statusCode === 429) {
+        limited = true;
+        break;
+      }
+      expect(result.statusCode, result.body).toBe(401);
+    }
+    expect(limited).toBe(true);
     await app.close();
   });
   it('accepts eight characters for setup, login and password changes, and blocks email sign-in', async () => {
@@ -790,12 +1072,12 @@ describe('username and eight-character passwords', () => {
     expect(changed.statusCode, changed.body).toBe(200);
     const login = await app.inject({
       method: 'POST',
-      url: '/api/auth/sign-in/username',
+      url: '/api/auth/sign-in/password',
       headers: { origin },
-      payload: { username: 'OWNER', password: 'newpass8' },
+      payload: { password: 'newpass8' },
     });
     expect(login.statusCode, login.body).toBe(200);
-    expect(login.json().user.username).toBe('owner');
+    expect(login.json().user.name).toBe('Owner');
     expect(
       (
         await app.inject({
@@ -806,21 +1088,6 @@ describe('username and eight-character passwords', () => {
         })
       ).statusCode,
     ).toBe(404);
-    await app.close();
-  });
-  it('gives an existing owner a username without changing their password or sessions', async () => {
-    const { app, store, headers } = await server();
-    store.db.prepare('UPDATE user SET username=NULL,name=?').run('Legacy Owner');
-    const auth = await createConsoleAuth(
-      store,
-      origin,
-      'test-auth-secret-with-more-than-32-characters',
-    );
-    const result = await auth.api.signInUsername({
-      body: { username: 'legacy_owner', password: 'testpass' },
-    });
-    expect(result.user.username).toBe('legacy_owner');
-    expect((await app.inject({ url: '/api/console/settings', headers })).statusCode).toBe(200);
     await app.close();
   });
 });
