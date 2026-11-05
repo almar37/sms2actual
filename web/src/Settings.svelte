@@ -13,7 +13,24 @@
     sessions = $state<any[]>([]),
     currentPassword = $state(''),
     newPassword = $state(''),
-    actualUrl = $state(untrack(() => catalog.actualUrl ?? ''));
+    taskerApiKey = $state(''),
+    revealingKey = $state(false);
+  async function toggleTaskerKey() {
+    if (taskerApiKey) {
+      taskerApiKey = '';
+      return;
+    }
+    revealingKey = true;
+    error = '';
+    try {
+      const credentials = await api('/api/console/tasker/credentials', {});
+      taskerApiKey = credentials.apiKey;
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      revealingKey = false;
+    }
+  }
   async function download() {
     busy = true;
     error = '';
@@ -43,6 +60,7 @@
     error = '';
     try {
       await api('/api/console/tasker/rotate', {});
+      taskerApiKey = '';
       notify('New Tasker credential created. Download and reimport the project.');
     } catch (e) {
       error = (e as Error).message;
@@ -86,18 +104,11 @@
       busy = false;
     }
   }
-  async function saveActual(event: SubmitEvent) {
-    event.preventDefault();
-    try {
-      await api('/api/console/preferences', { actualUrl }, 'PUT');
-      catalog.actualUrl = actualUrl;
-      notify('Actual Budget link saved.');
-    } catch (e) {
-      error = (e as Error).message;
-    }
-  }
   $effect(() => {
-    if (!tasker) void loadSessions();
+    if (!tasker) {
+      taskerApiKey = '';
+      void loadSessions();
+    }
   });
 </script>
 
@@ -108,7 +119,7 @@
     <p>
       {tasker
         ? 'A ready-to-import project. A direct line from SMS to Actual.'
-        : 'Manage access, sessions, and your Actual Budget shortcut.'}
+        : 'Manage access, sessions, and your Actual server connection.'}
     </p>
   </div>
   <span class="tag"
@@ -138,6 +149,23 @@
             >.</small
           ></label
         >
+        <label
+          >Tasker SMS API key
+          <div class="input-button">
+            <input
+              type={taskerApiKey ? 'text' : 'password'}
+              value={taskerApiKey}
+              readonly
+              autocomplete="off"
+              placeholder="Reveal the key when you need it"
+            /><button type="button" onclick={toggleTaskerKey} disabled={revealingKey}
+              >{revealingKey ? 'Loading…' : taskerApiKey ? 'Hide API key' : 'Show API key'}</button
+            >
+          </div>
+          <small
+            >Use this key in Tasker’s X-API-Key header. It is also included in the downloaded XML.</small
+          >
+        </label>
         <div class="endpoint-preview">
           <span class="method-badge">POST</span><code
             >{url.replace(/\/$/, '')}/api/v1/inbox-sync/batch</code
@@ -269,34 +297,31 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
-            <h2>Actual Budget shortcut</h2>
-            <p>Open your full budget from this workspace.</p>
+            <h2>Actual server connection</h2>
+            <p>The address sms2actual uses to connect to Actual.</p>
           </div>
         </div>
-        <form class="panel-body" onsubmit={saveActual}>
-          <label
-            >Browser URL for Actual<input
-              type="url"
-              bind:value={actualUrl}
-              placeholder="https://actual.example.com"
-              required
-            /></label
-          ><button class="wide">Save shortcut<Icon name="external" size={16} /></button
-          >{#if catalog.actualUrl}<a
-              class="button wide"
-              href={catalog.actualUrl}
-              target="_blank"
-              rel="noreferrer">Open Actual Budget<Icon name="external" size={16} /></a
-            >{/if}
-        </form>
-      </section>
-      <section class="tip-card">
-        <span class="tip-icon">✳</span>
-        <h3>A small bridge.<br />A clearer budget.</h3>
-        <p>
-          sms2actual takes care of your messages. Actual is still the home for your full budget,
-          reports, and account management.
-        </p>
+        <div class="panel-body">
+          <label for="actual-server-address">Local Actual server address</label>
+          <input
+            id="actual-server-address"
+            type="url"
+            value={catalog.actualServerUrl ?? ''}
+            readonly
+            aria-describedby="actual-server-help actual-server-config"
+          />
+          <p id="actual-server-help" class="muted">
+            The sms2actual server must be able to reach Actual at this address. Docker addresses
+            such as <code>http://actual:5006</code> work when both services share a network. Your browser
+            does not need to reach this address.
+          </p>
+          <p id="actual-server-config" class="muted small">
+            This is the configured connection address. To change it, update <code
+              >ACTUAL_SERVER_URL</code
+            >
+            in the service’s <code>.env</code> file and recreate sms2actual.
+          </p>
+        </div>
       </section>
     </aside>
   </div>{/if}

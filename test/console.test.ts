@@ -549,6 +549,70 @@ describe('console financial safeguards', () => {
     await processor.tick();
     expect(settings.get(`limit:credit`)).toMatchObject({ cents: 3000000 });
   });
+  it('shows the automatically routed counterparty for an imported own-account transfer', async () => {
+    const { app, headers, store, processor, imports, config } = await server();
+    config.accounts[0]!.match = { bank: 'alrajhi', accountSuffixes: ['0131'] };
+    config.accounts[1]!.match = { bank: 'alrajhi', accountSuffixes: ['7900'] };
+    const { id } = store.enqueue({
+      sender: 'AlRajhiBank',
+      message: 'حوالة بين حساباتك\nمبلغ:SR 1\nمن:0131\nالى:7900\n26/11/6 00:01',
+      receivedAt: '2026-11-06T00:01:00+03:00',
+    });
+    await processor.tick();
+    expect(imports).toHaveBeenCalledWith('checking', [
+      expect.objectContaining({ amount: -100, payee: 'payee-credit' }),
+    ]);
+    const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({
+      status: 'imported',
+      targetAccountId: 'credit',
+      parsed: { accountAlias: '0131', transferCounterpartyAlias: '7900' },
+    });
+    expect(detail.json().parsed.explicitTransferAccountId).toBeUndefined();
+    await app.close();
+  });
+  it.each([
+    { fields: { transferCounterpartyAlias: '5678' }, target: 'credit' },
+    { fields: { transferCounterpartyAlias: '9999' }, target: null },
+    {
+      fields: { transferCounterpartyAlias: '5678', explicitTransferAccountId: 'checking' },
+      target: 'checking',
+    },
+    { fields: { billPaymentIdentifier: '404' }, target: 'credit' },
+    {
+      fields: {
+        kind: 'transfer_in',
+        cardPaymentReceived: true,
+        assumedFundingAccountId: 'checking',
+      },
+      target: 'checking',
+    },
+    { fields: { kind: 'purchase', billPaymentIdentifier: '404' }, target: null },
+  ])(
+    'resolves message detail counterparty using import rules: $fields',
+    async ({ fields, target }) => {
+      const { app, headers, store, config } = await server();
+      config.accounts[1]!.match.billPaymentIdentifiers = ['404'];
+      const { id } = store.enqueue({ sender: 'SAB', message: 'Transfer fixture', receivedAt: now });
+      store.update(id, 'imported', {
+        parsed: {
+          bank: 'sab',
+          kind: 'transfer_out',
+          amountCents: -100,
+          feeCents: 0,
+          payee: 'Bank transfer',
+          occurredAt: now,
+          note: 'Fixture',
+          ...fields,
+        } as import('../src/types.js').ParsedTransaction,
+      });
+      const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().targetAccountId).toBe(target);
+      await app.close();
+    },
+  );
   it('separates the principal and fee for a manually reviewed transfer', async () => {
     const { app, headers, store, processor, imports } = await server();
     const { id } = store.enqueue({
@@ -759,4 +823,41 @@ describe('username and eight-character passwords', () => {
     expect((await app.inject({ url: '/api/console/settings', headers })).statusCode).toBe(200);
     await app.close();
   });
+});
+
+it('reveals Tasker credentials only to an authenticated same-origin request', async () => {
+  const { app, headers, settings } = await server();
+  await app.inject({ method: 'POST', url: '/api/console/tasker/rotate', headers, payload: {} });
+  const token = settings.decrypt(settings.get<string>('taskerKey')!);
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/api/console/tasker/credentials',
+        headers: { origin },
+        payload: {},
+      })
+    ).statusCode,
+  ).toBe(401);
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/api/console/tasker/credentials',
+        headers: { cookie: headers.cookie, origin: 'https://evil.test' },
+        payload: {},
+      })
+    ).statusCode,
+  ).toBe(403);
+  const response = await app.inject({
+    method: 'POST',
+    url: '/api/console/tasker/credentials',
+    headers,
+    payload: {},
+  });
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toEqual({ apiKey: token, serviceUrl: origin });
+  expect(response.headers['cache-control']).toBe('no-store');
+  expect((await app.inject({ url: '/api/console/settings', headers })).body).not.toContain(token);
+  await app.close();
 });

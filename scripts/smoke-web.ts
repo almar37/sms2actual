@@ -81,6 +81,25 @@ for (let i = 0; i < 9; i++) {
         },
   );
 }
+const transferMessage = 'SAB outgoing transfer From: 1234 To: 4567 Amount: SAR 1';
+const transferEvent = store.enqueue({
+  sender: 'SAB',
+  message: transferMessage,
+  receivedAt: new Date().toISOString(),
+});
+store.update(transferEvent.id, 'imported', {
+  parsed: {
+    bank: 'sab',
+    kind: 'transfer_out',
+    accountAlias: '1234',
+    transferCounterpartyAlias: '4567',
+    amountCents: -100,
+    feeCents: 0,
+    payee: 'Bank transfer',
+    occurredAt: new Date().toISOString(),
+    note: 'Synthetic transfer fixture',
+  },
+});
 const actual: ActualAdapter = {
   initialize: async () => {},
   shutdown: async () => {},
@@ -108,7 +127,15 @@ const app = buildServer({
   store,
   processor: { tick: async () => {}, setMinConfidence: () => {} } as unknown as Processor,
   ready: () => true,
-  console: { auth, settings, actual, config, publicUrl: origin, enricher: new NoopEnricher() },
+  console: {
+    auth,
+    settings,
+    actual,
+    config,
+    publicUrl: origin,
+    actualServerUrl: 'http://actual:5006',
+    enricher: new NoopEnricher(),
+  },
 });
 let browser;
 try {
@@ -156,6 +183,12 @@ try {
     animations: 'disabled',
   });
   await page.getByRole('link', { name: 'SMS inbox', exact: true }).click();
+  await page.getByRole('button', { name: transferMessage, exact: true }).click();
+  await expect(page.getByRole('combobox', { name: /^Counterparty account/ })).toHaveValue(
+    'savings',
+  );
+  await expect(page.getByRole('button', { name: /Approve & import/ })).toBeDisabled();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Unfamiliar bank message for review' }).click();
   await expect(page.getByRole('dialog', { name: 'Review message' })).toBeVisible();
   const review = page.getByRole('dialog', { name: 'Review message' });
@@ -210,6 +243,19 @@ try {
   expect((await download).suggestedFilename()).toBe('sms2actual.prj.xml');
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Active sessions' })).toBeVisible();
+  await expect(page.getByLabel('Local Actual server address')).toHaveValue('http://actual:5006');
+  await expect(page.getByLabel('Local Actual server address')).toHaveAttribute('readonly', '');
+  await expect(
+    page.getByText('The sms2actual server must be able to reach Actual at this address.', {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(page.getByLabel('Browser URL for Actual')).toHaveCount(0);
+  await page.screenshot({
+    path: `${artifactDir}/settings.png`,
+    fullPage: true,
+    animations: 'disabled',
+  });
   await page.getByLabel('Current password').fill('testpass');
   await page.getByLabel(/^New password/).fill('newpass8');
   await page.getByRole('button', { name: 'Update password' }).click();

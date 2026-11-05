@@ -128,6 +128,7 @@ try {
       actual,
       config,
       publicUrl: env.PUBLIC_URL,
+      actualServerUrl: env.ACTUAL_SERVER_URL,
       trustedOrigins: env.TRUSTED_ORIGINS,
       enricher: ai,
     },

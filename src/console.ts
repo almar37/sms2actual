@@ -19,6 +19,7 @@ import { validateAccountRules } from './config.js';
 import { merchantKey } from './merchant-resolver.js';
 import { parseSms } from './parser.js';
 import { resolveSmsSource } from './sms-source.js';
+import { resolveTransferTarget } from './routing.js';
 import { generateTaskerProject } from './tasker-export.js';
 
 export interface ConsoleOptions {
@@ -27,6 +28,7 @@ export interface ConsoleOptions {
   actual: ActualAdapter;
   config: ResolvedConfig;
   publicUrl: string;
+  actualServerUrl?: string;
   trustedOrigins?: string[];
   enricher: Enricher;
   taskerTemplatePath?: string;
@@ -65,6 +67,7 @@ export function registerConsole(
       banks: options.config.banks,
       publicUrl: options.publicUrl,
       actualUrl: options.settings.get('actualUrl') ?? '',
+      actualServerUrl: options.actualServerUrl ?? '',
       limits: Object.fromEntries(
         accounts.map((a) => [a.id, options.settings.get(`limit:${a.id}`)]),
       ),
@@ -223,8 +226,18 @@ export function registerConsole(
   app.get<{ Params: { id: string } }>('/api/console/events/:id', async (req, reply) => {
     const event = store.get(req.params.id);
     if (!event) return reply.code(404).send({ error: 'Message not found' });
+    const tx = readJson(event.parsed) as ParsedTransaction | null;
+    let targetAccountId: string | null = null;
+    if (tx && ['transfer_in', 'transfer_out', 'card_payment'].includes(tx.kind)) {
+      try {
+        targetAccountId = resolveTransferTarget(options.config.accounts, tx)?.id ?? null;
+      } catch {
+        // Ambiguous routes must remain inspectable so the owner can review them.
+      }
+    }
     return {
       ...eventView(event),
+      targetAccountId,
       history: store.eventHistory(event.id),
       enrichmentAttempts: store.enrichmentAttempts(event.id),
     };
@@ -539,6 +552,13 @@ export function registerConsole(
       }[]
     ).map((l) => ({ ...l, details: readJson(l.details) })),
   }));
+  app.post('/api/console/tasker/credentials', async (_req, reply) => {
+    const encrypted = options.settings.get<string>('taskerKey');
+    if (!encrypted) return reply.code(409).send({ error: 'Generate a Tasker credential first' });
+    return reply
+      .header('cache-control', 'no-store')
+      .send({ apiKey: options.settings.decrypt(encrypted), serviceUrl: options.publicUrl });
+  });
   app.post('/api/console/tasker/rotate', async () => {
     options.settings.set(
       'taskerKey',

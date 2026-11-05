@@ -13,7 +13,7 @@ import type {
 } from './types.js';
 import { EventStore, type StoredEvent } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
-import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
+import { resolveAccount, resolveTransferTarget } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
@@ -92,27 +92,6 @@ export class Processor {
     } finally {
       this.running = false;
     }
-  }
-  private transferTarget(tx: ParsedTransaction) {
-    if (tx.explicitTransferAccountId)
-      return (
-        this.config.accounts.find((a) => a.id === tx.explicitTransferAccountId) ?? {
-          id: tx.explicitTransferAccountId,
-          key: tx.explicitTransferAccountId,
-        }
-      );
-    if (tx.billPaymentIdentifier)
-      return resolveBillPaymentAccount(this.config.accounts, tx.billPaymentIdentifier);
-    if (tx.transferCounterpartyAlias)
-      return resolveTransferAccount(this.config.accounts, tx.transferCounterpartyAlias);
-    if (tx.kind === 'transfer_in' && tx.cardPaymentReceived && tx.assumedFundingAccountId)
-      return (
-        this.config.accounts.find((account) => account.id === tx.assumedFundingAccountId) ?? {
-          key: tx.assumedFundingAccountId,
-          id: tx.assumedFundingAccountId,
-        }
-      );
-    return undefined;
   }
   private async importTransactions(accountId: string, transactions: ActualTransaction[]) {
     const imported = await this.actual.importTransactions(accountId, transactions);
@@ -350,8 +329,8 @@ export class Processor {
             this.store.get(candidate.event_id)!.parsed!,
           ) as ParsedTransaction;
           if (!['transfer_in', 'transfer_out', 'card_payment'].includes(prior.kind)) return false;
-          const currentTarget = this.transferTarget(tx);
-          const priorTarget = this.transferTarget(prior);
+          const currentTarget = resolveTransferTarget(this.config.accounts, tx);
+          const priorTarget = resolveTransferTarget(this.config.accounts, prior);
           if (currentTarget && currentTarget.key !== candidate.source_alias) return false;
           if (priorTarget && priorTarget.key !== account.key) return false;
           return currentTarget !== undefined || priorTarget !== undefined;
@@ -359,7 +338,9 @@ export class Processor {
       const counterpartTx = counterpart
         ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
         : undefined;
-      const counterpartTarget = counterpartTx ? this.transferTarget(counterpartTx) : undefined;
+      const counterpartTarget = counterpartTx
+        ? resolveTransferTarget(this.config.accounts, counterpartTx)
+        : undefined;
       if (counterpart && counterpartTarget) {
         this.store.recordTransfer(
           event.id,
@@ -375,7 +356,7 @@ export class Processor {
       // A counterpart already imported without a transfer payee covers only
       // its own account. Import this side independently to avoid crediting
       // that account again through Actual's linked transfer.
-      const target = counterpart ? undefined : this.transferTarget(tx);
+      const target = counterpart ? undefined : resolveTransferTarget(this.config.accounts, tx);
       if (target) {
         const payee = await this.actual.transferPayee(target.id);
         const principal =

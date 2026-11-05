@@ -64,3 +64,29 @@ export function resolveAccountBySuffix(
     suffix,
   );
 }
+
+/** Shared destination routing for imports and the message details panel. */
+export function resolveTransferTarget(
+  accounts: ResolvedAccount[],
+  tx: ParsedTransaction,
+): Pick<ResolvedAccount, 'id' | 'key'> | undefined {
+  if (tx.explicitTransferAccountId)
+    return (
+      accounts.find((a) => a.id === tx.explicitTransferAccountId) ?? {
+        id: tx.explicitTransferAccountId,
+        key: tx.explicitTransferAccountId,
+      }
+    );
+  if (tx.billPaymentIdentifier)
+    return resolveBillPaymentAccount(accounts, tx.billPaymentIdentifier);
+  if (tx.transferCounterpartyAlias)
+    return resolveTransferAccount(accounts, tx.transferCounterpartyAlias);
+  if (tx.kind === 'transfer_in' && tx.cardPaymentReceived && tx.assumedFundingAccountId)
+    return (
+      accounts.find((account) => account.id === tx.assumedFundingAccountId) ?? {
+        key: tx.assumedFundingAccountId,
+        id: tx.assumedFundingAccountId,
+      }
+    );
+  return undefined;
+}

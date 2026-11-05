@@ -85,7 +85,7 @@
         fee: (tx?.feeCents ?? 0) / 100,
         payee: tx?.payee ?? '',
         categoryId: selected.suggestion?.categoryId ?? '',
-        targetAccountId: tx?.explicitTransferAccountId ?? '',
+        targetAccountId: selected.targetAccountId ?? '',
         date: localDateInput(tx?.occurredAt ?? selected.input.receivedAt),
       };
     } catch (e) {

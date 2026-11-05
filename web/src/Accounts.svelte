@@ -214,6 +214,12 @@
           </p>{/if}
         <details>
           <summary>Transfer and bill payment identifiers</summary>
+          <p class="muted small">
+            These optional references help recognize transfers between your own accounts. Account
+            and card suffixes are already checked automatically. Leave these blank unless an SMS
+            uses a different reference for this account. A match creates a linked transfer in
+            Actual.
+          </p>
           <div class="form-grid">
             <label
               >Transfer destination suffixes<input
@@ -223,8 +229,11 @@
                   account.match.transferIdentifiers = values.length ? values : undefined;
                   dirty = true;
                 }}
-                placeholder="e.g. 1234"
-              /></label
+                placeholder="e.g. 9876"
+              /><small
+                >Example: transfers to this account show an IBAN ending in 9876 instead of its usual
+                suffix. Add 9876 here.</small
+              ></label
             ><label
               >Bill payment identifiers<input
                 value={(account.match.billPaymentIdentifiers ?? []).join(', ')}
@@ -234,7 +243,10 @@
                   dirty = true;
                 }}
                 placeholder="e.g. 5678"
-              /></label
+              /><small
+                >Example: a repayment to this credit account shows “Biller: 5678” or “مفوتر: 5678”.
+                Add 5678 here.</small
+              ></label
             >
           </div>
           {#if account.match.transactionKinds}<p class="muted small">
