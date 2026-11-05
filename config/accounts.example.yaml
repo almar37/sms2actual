@@ -1,0 +1,40 @@
+# Bank IDs refer to entries in config/banks.yaml.
+accounts:
+  - actualName: SAB Current Account
+    match:
+      bank: sab
+      accountSuffixes: ['4101', '101', '4187']
+  - actualName: SAB Payroll Account
+    match:
+      bank: sab
+      accountSuffixes: ['5202', '202']
+  - actualName: SAB Credit Card
+    match:
+      bank: sab
+      accountSuffixes: ['8601']
+  - actualName: Al Rajhi Current Account
+    match:
+      bank: alrajhi
+      hasBalance: false
+      transferIdentifiers: ['7404']
+  - actualName: Al Rajhi Credit Card
+    match:
+      bank: alrajhi
+      hasBalance: true
+      transferIdentifiers: ['6303']
+      billPaymentIdentifiers: ['404']
+  - actualName: Wadaie
+    match:
+      bank: wadaie
+      transactionKinds: [transfer_in, transfer_out]
+# Add this route after confirming the exact existing Actual account name:
+#  - actualName: D360 Account
+#    match:
+#      bank: d360
+#      accountSuffixes: ['5892']
+bankFeesCategory: Bank Fees
+eligibleCategories:
+  - Groceries
+  - Dining
+  - Transportation
+  - Shopping

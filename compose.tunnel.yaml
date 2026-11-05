@@ -1,0 +1,42 @@
+# Run on the Docker host that runs Actual and cloudflared.
+# Cloudflare published application: https://<sms-hostname> -> http://actual-sms:3000
+services:
+  actual-sms:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - sms-data:/data
+      - actual-cache:/actual-cache
+      - ./config/accounts.yaml:/config/accounts.yaml:ro
+      - ./config/banks.yaml:/config/banks.yaml:ro
+      - ./config/parsing.yaml:/config/parsing.yaml:ro
+    networks:
+      - actual
+      - tunnel
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000/readyz').then(r=>{if(!r.ok)process.exit(1)})",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+volumes:
+  sms-data:
+  actual-cache:
+networks:
+  actual:
+    external: true
+    name: ${ACTUAL_NETWORK:-shared-net}
+  tunnel:
+    external: true
+    name: ${TUNNEL_NETWORK:-streaming_flare-net}

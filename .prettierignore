@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+actual-cache/
+.env
+.gitenv
+config/accounts.yaml
+transfer/
