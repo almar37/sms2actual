@@ -1,5 +1,6 @@
 import eslint from '@eslint/js';
 import prettier from 'eslint-config-prettier';
+import svelte from 'eslint-plugin-svelte';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
@@ -21,5 +22,16 @@ export default tseslint.config(
       'no-constant-condition': ['error', { checkLoops: false }],
     },
   },
+  ...svelte.configs.recommended,
+  {
+    files: ['**/*.svelte'],
+    languageOptions: { parserOptions: { parser: tseslint.parser } },
+    rules: {
+      'svelte/no-at-html-tags': 'error',
+      'no-undef': 'off',
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
+  },
+  { files: ['svelte.config.js'], languageOptions: { sourceType: 'module' } },
   prettier,
 );

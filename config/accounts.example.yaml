@@ -32,6 +32,9 @@ accounts:
 #    match:
 #      bank: d360
 #      accountSuffixes: ['5892']
+# Optional default for card-payment receipts that omit their funding account.
+# Use an exact existing, open Actual account name, or omit to record the card credit only.
+# creditCardPaymentFundingAccount: SAB Current Account
 bankFeesCategory: Bank Fees
 eligibleCategories:
   - Groceries

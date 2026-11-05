@@ -1,4 +1,4 @@
-# Tasker SMS → Actual Budget
+# sms2actual
 
 Turn bank SMS notifications into transactions in Actual Budget.
 
@@ -9,6 +9,31 @@ The included configuration supports SAB, Al Rajhi, Wadaie, and D360. STC Bank me
 For the Homebase deployment using an existing Cloudflare Tunnel, see
 [the deployment guide](DEPLOYMENT.md).
 
+## Web workspace
+
+sms2actual includes a Svelte 5 frontend served by the same Fastify service. It has high-contrast light and dark themes, a custom SVG logo, and responsive layouts for desktop and mobile.
+
+After completing the existing Actual connection setup below:
+
+1. Set `PUBLIC_URL` in `.env` to the exact browser origin (for example, `https://sms.example.com`). Keep the service behind HTTPS in production. For local use, the default is `http://localhost:3000`. To use additional local or Tailscale addresses, set `TRUSTED_ORIGINS` to their exact HTTP origins, separated by commas, and bind the corresponding host ports in Compose.
+2. Rebuild and start the service with `docker compose up -d --build` using your Compose file.
+3. Open that URL and create the workspace owner. The first-time setup form requires the existing `API_KEY` from `.env`, a username, and a password of at least 8 characters. Public signup is disabled after this setup.
+4. Configure **Accounts & cards**, including account/card suffixes, credit limits, repayment source accounts, Bank Fees, and categories available to merchant enrichment. Multiple cards can share one Actual account.
+5. Open **Tasker connection** and download the preconfigured `sms2actual.prj.xml`. Import it into Tasker and grant SMS permission. Its dedicated credential submits to `/api/v1`; existing `/v1` integrations continue to work.
+
+The workspace also includes:
+
+- **Overview:** balances for every open Actual account, the latest ten transactions across those accounts, message counts, and the last successful Tasker contact. Add your browser-facing Actual URL in Settings for a shortcut to the full budget.
+- **SMS inbox:** search, server-side sorting, status filters, pagination, original SMS text, parser results, category support decisions, and audit history. Review an unimported message, choose its action/account/category, then approve it. Already imported or partially imported messages cannot be reimported through this form; correct those in Actual and use a merchant mapping or template for future messages.
+- **Merchants:** inspect and edit remembered payees and categories per account. History is consulted before requesting AI assistance.
+- **Message templates:** paste a reference SMS or start from an inbox message, read its parsed fields, replace changing values with `{amount}`, `{merchant}`, `{suffix}`, `{balance}`, `{fee}`, `{to}`, or `{date}`, and test the example before saving. `{amount}` is required, suffixes have 3–6 digits, and `{date}` should use an ISO date with time zone. Templates are scoped to a recognized bank sender and can be paused. Overlapping matches go to review. Existing shared grammar and bank-specific recognition templates remain visible.
+- **AI categorization:** configure OpenCode Go, OpenAI, or Anthropic API credentials, enter or load available model IDs, choose the confidence threshold, test a merchant, and inspect the latest 100 category support decisions. These integrations use provider APIs. Keys are encrypted at rest and never returned to the browser.
+- **Settings:** change your password, inspect/revoke browser sessions, and set your Actual shortcut. Tasker credentials can be replaced independently of browser sessions.
+
+UI settings, custom templates, overrides, keys, and sessions persist in the existing SQLite data volume. YAML remains the initial seed and shared parser configuration; web edits do not rewrite read-only mounted files. Keep `AUTH_SECRET` stable if you set it. Otherwise a secret is derived from `API_KEY`, so changing that key invalidates sessions and makes previously encrypted keys unreadable. Back up the SQLite volume and your secret together. Credit limits are detected only when a matching credit-account message explicitly states a credit limit; available balance is not treated as a limit.
+
+For development, run `npm run build` once, then `npm run dev` to serve the frontend and API on port 3000. For frontend hot reload, run `npm run dev:web` alongside it and set `PUBLIC_URL=http://localhost:5173`; Vite proxies `/api` to Fastify. `npm run check` includes Svelte diagnostics and the complete backend test suite. For the isolated browser workflow check, install Chromium with `npx playwright install --with-deps chromium` and run `npm run test:web`; it uses in-memory SQLite and a fake Actual adapter, with no live service credentials. `npm run build` compiles both the service and frontend into `dist/`.
+
 ## Get started
 
 ### 1. Have these ready
@@ -16,7 +41,7 @@ For the Homebase deployment using an existing Cloudflare Tunnel, see
 You'll need:
 
 - An Android phone with Tasker 6.6 and SMS permission.
-- A machine with Docker Compose, Node.js 20+, and npm.
+- A machine with Docker Compose, Node.js 22+, and npm.
 - An Actual Budget server running **26.9.0**, matching the API version bundled with this service.
 - A budget with the accounts and categories you want to use already created in Actual.
 - An HTTPS address your phone can reach, with a reverse proxy forwarding requests to this service.
@@ -43,6 +68,8 @@ Setup writes `.env` and `config/accounts.yaml`, and generates an API key for Tas
 Use an Actual server URL that both the setup container and the running service can reach. Inside Docker, `localhost` means the container itself. If your Actual hostname needs an explicit IP mapping, see [Docker networking](#docker-networking).
 
 The wizard gets its bank list from `config/banks.yaml`. If your bank isn't listed, [add it](#adding-a-bank) before running setup.
+
+The wizard also asks which account funds credit-card repayments when the SMS omits the funding account. Choose an existing open Actual account, or choose no default to record only the card credit.
 
 ### 3. Start the service
 
@@ -144,6 +171,14 @@ For transfers, `transferIdentifiers` optionally lists destination aliases. `bill
 
 Tasker always sends the full message, so account routing changes don't require changes on your phone.
 
+For credit-card repayment receipts that omit the funding account, set an optional default in `config/accounts.yaml`:
+
+```yaml
+creditCardPaymentFundingAccount: Checking - 0131
+```
+
+Use the exact existing, open Actual account name. The service credits the card and uses Actual's transfer payee to debit the funding account as a linked transfer. This default applies only to recognized card-repayment receipts; a funding account explicitly identified in the SMS takes priority. Ordinary deposits, refunds, and purchases do not use this default. The chosen funding account is saved with each payment, and changing the default affects future payments. Restart after editing the setting. Already imported card credits require linking in Actual rather than replaying the SMS.
+
 D360 uses `bank: d360` and the card suffix shown in the SMS. Set `actualName` to the exact name of your existing Actual account. For an international purchase such as `JPY 878.00 (SAR 20.91)`, the service imports the SAR equivalent plus any separately reported fee and keeps the foreign amount in the notes. It never treats a yen amount as SAR. Run **Reconcile Inbox Last 7 Days** after enabling D360 to pick up messages that were previously skipped.
 
 ### Adding a bank
@@ -186,6 +221,8 @@ Compose mounts the registry at `/config/banks.yaml`. Older deployments need to a
 All banks share one parser engine and a set of English/Arabic rules in `config/parsing.yaml`. Bank identification is a separate step used for routing. The parser reads transaction details; routing and processing handle account matching and transfers between your own accounts.
 
 You can add a template when a bank uses wording the shared rules don't recognize. Add it under `templates` in `config/parsing.yaml`, then reference its ID on the bank entry in `config/banks.yaml` with `templates: [example-purchase]`.
+
+Mark an incoming card-repayment template with `kind: transfer_in` and `cardPaymentReceived: true` to allow the configured funding-account default. The same marker is supported on shared incoming-kind rules. Other transaction kinds cannot use this marker.
 
 For example:
 

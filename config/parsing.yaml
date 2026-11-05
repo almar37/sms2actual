@@ -16,6 +16,7 @@ shared:
           flags: iu
   kinds:
     - value: transfer_in
+      cardPaymentReceived: true
       patterns:
         - source: \bcredit\s+card\s*[:-]\s*(?:payment|credited)\b
           flags: iu
@@ -264,3 +265,20 @@ templates:
         - source: '(?:^|\s|\\n)(?:الرصيد|رصيد)\s*[:：]\s*(?:SAR|SR|ر\.?س\.?)?\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|\\n|$)'
           flags: iu
     required: [principal, accountAlias, merchant]
+  - id: alrajhi-card-payment-received
+    match:
+      - source: '^بطاقة\s+فيزا\s*[:：]\s*سداد(?=\s|$)'
+        flags: u
+    kind: transfer_in
+    cardPaymentReceived: true
+    fields:
+      principal:
+        - source: '^بطاقة\s+فيزا\s*[:：]\s*سداد\s+بـ?\s*(?:SAR|SR|ر\.?س\.?)\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|\\n|$)'
+          flags: iu
+      accountAlias:
+        - source: '(?:^|\s|\\n)عبر\s*[:：]?\s*[*xX-]*(?<value>\d{3,6})(?!\d)'
+          flags: iu
+      balance:
+        - source: '(?:^|\s|\\n)(?:الرصيد|رصيد)\s*[:：]\s*(?:SAR|SR|ر\.?س\.?)?\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|\\n|$)'
+          flags: iu
+    required: [principal, accountAlias]

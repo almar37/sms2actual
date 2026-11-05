@@ -168,4 +168,16 @@ describe('configurable message templates', () => {
       'unknown template custom',
     );
   });
+
+  it('rejects card-payment receipt markers on outgoing or purchase rules', () => {
+    const invalidTemplate = { ...template(), cardPaymentReceived: true };
+    expect(() => compileParserConfig({ ...document(), templates: [invalidTemplate] })).toThrow(
+      'must be incoming transfers',
+    );
+    const d = document();
+    d.shared.kinds.find(
+      (rule: { value: string }) => rule.value === 'purchase',
+    ).cardPaymentReceived = true;
+    expect(() => compileParserConfig(d)).toThrow('must be incoming transfers');
+  });
 });

@@ -11,3 +11,4 @@ compose.host-override.yaml
 compose.proxy.yaml
 *.log
 transfer/
+compose.tailscale.yaml

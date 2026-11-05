@@ -57,7 +57,7 @@ const config: ResolvedConfig = {
   eligibleCategories: [],
 };
 
-function setup() {
+function setup(overrides: Partial<ResolvedConfig> = {}, importErrors: string[] = []) {
   const store = new EventStore(':memory:');
   stores.push(store);
   const imported: {
@@ -79,7 +79,11 @@ function setup() {
     },
     importTransactions: async (account, transactions) => {
       imported.push({ account, transactions });
-      return { added: ['actual-id'], updated: [], errors: [] };
+      return {
+        added: ['actual-id'],
+        updated: [],
+        errors: importErrors.map((message) => ({ message })),
+      };
     },
   };
   const ai: Enricher = { enrich: async () => ({ status: 'disabled', durationMs: 0 }) };
@@ -87,7 +91,7 @@ function setup() {
     store,
     imported,
     transferPayees,
-    processor: new Processor(store, actual, ai, config),
+    processor: new Processor(store, actual, ai, { ...config, ...overrides }),
   };
 }
 
@@ -102,6 +106,168 @@ const cardPaymentToBillerCode = 'SAB card payment From: 5202 To: 404 Amount: SAR
 const cardPaymentIbanEndingInBillerCode =
   'SAB card payment From: 5202 IBAN: SA0000000000000404 Amount: SAR 100.00';
 const receivedAt = '2026-08-22T10:10:30+03:00';
+
+describe('credit-card repayment funding defaults', () => {
+  const receipt = {
+    eventId: 'card-receipt',
+    sender: 'AlRajhiBank',
+    message: 'بطاقة فيزا:سداد بـSR 80.50 \\nعبر2393;فيزا\\nرصيد:1200.1 SR \\n؜5/11/26 21:56',
+    receivedAt: '2026-11-05T18:56:40.094Z',
+  };
+  const funding = () => ({ id: 'alrajhi-checking-id', name: 'Alrajhi Checking' });
+
+  it.each([funding(), { id: 'other-existing-account-id', name: 'Account without SMS routing' }])(
+    'links a received card payment to the configured $name account',
+    async (creditCardPaymentFundingAccount) => {
+      const { store, imported, transferPayees, processor } = setup({
+        creditCardPaymentFundingAccount,
+      });
+      store.enqueue(receipt);
+      await processor.tick();
+      expect(transferPayees).toEqual([creditCardPaymentFundingAccount.id]);
+      expect(imported).toEqual([
+        {
+          account: 'credit-card-id',
+          transactions: [
+            expect.objectContaining({
+              amount: 8050,
+              payee: `transfer:${creditCardPaymentFundingAccount.id}`,
+            }),
+          ],
+        },
+      ]);
+      expect(imported[0]?.transactions[0]).not.toHaveProperty('category');
+      expect(store.get(receipt.eventId)).toMatchObject({
+        status: 'imported',
+        actual_transaction_id: 'actual-id',
+      });
+      expect(JSON.parse(store.get(receipt.eventId)!.parsed!)).toMatchObject({
+        cardPaymentReceived: true,
+        assumedFundingAccountId: creditCardPaymentFundingAccount.id,
+      });
+    },
+  );
+
+  it('prefers the funding account explicitly named in the SMS', async () => {
+    const { store, transferPayees, processor } = setup({
+      creditCardPaymentFundingAccount: funding(),
+    });
+    store.enqueue({
+      ...receipt,
+      message: 'Credit Card:Payment From: 5202 To: 2393 Amount: SAR 80.50 Balance: SAR 1200.10',
+    });
+    await processor.tick();
+    expect(transferPayees).toEqual(['payroll-id']);
+    expect(JSON.parse(store.get(receipt.eventId)!.parsed!).assumedFundingAccountId).toBeUndefined();
+  });
+
+  it('does not replace an unknown explicit funding account with the default', async () => {
+    const { store, imported, transferPayees, processor } = setup({
+      creditCardPaymentFundingAccount: funding(),
+    });
+    store.enqueue({
+      ...receipt,
+      message: 'Credit Card:Payment From: 9999 To: 2393 Amount: SAR 80.50 Balance: SAR 1200.10',
+    });
+    await processor.tick();
+    expect(transferPayees).toEqual([]);
+    expect(imported[0]?.transactions[0]).toMatchObject({
+      amount: 8050,
+      payee_name: 'Bank transfer',
+    });
+  });
+
+  it.each([
+    'Incoming transfer To: 2393 Amount: SAR 80.50 Balance: SAR 1200.10',
+    'Refund Card:2393 Amount: SAR 80.50 Balance: SAR 1200.10',
+    'Purchase Card:2393 Amount: SAR 80.50 at Example Balance: SAR 1200.10',
+  ])('leaves unrelated transactions independent of the funding default: %s', async (message) => {
+    const { store, transferPayees, processor } = setup({
+      creditCardPaymentFundingAccount: funding(),
+    });
+    store.enqueue({ ...receipt, message });
+    await processor.tick();
+    expect(store.get(receipt.eventId)?.status).toBe('imported');
+    expect(transferPayees).toEqual([]);
+    expect(JSON.parse(store.get(receipt.eventId)!.parsed!).assumedFundingAccountId).toBeUndefined();
+  });
+
+  it('rejects a funding default that points back to the receiving card', async () => {
+    const { store, imported, processor } = setup({
+      creditCardPaymentFundingAccount: { id: 'credit-card-id', name: 'Credit Card' },
+    });
+    store.enqueue(receipt);
+    await processor.tick();
+    expect(imported).toEqual([]);
+    expect(store.get(receipt.eventId)).toMatchObject({
+      status: 'queued',
+      error: 'Credit-card payment funding account must differ from the card account',
+    });
+  });
+
+  it('keeps the assumed funding account across retries and checks Actual import errors', async () => {
+    const defaultAccount = funding();
+    const errors = ['Actual rejected transfer'];
+    const { store, imported, processor } = setup(
+      { creditCardPaymentFundingAccount: defaultAccount },
+      errors,
+    );
+    store.enqueue(receipt);
+    await processor.tick();
+    expect(store.get(receipt.eventId)).toMatchObject({
+      status: 'queued',
+      error: 'Actual rejected transfer',
+    });
+    expect(store.db.prepare('SELECT count(*) count FROM transfers').get()).toEqual({ count: 0 });
+    defaultAccount.id = 'payroll-id';
+    errors.length = 0;
+    store.update(receipt.eventId, 'queued', { nextAttemptAt: new Date().toISOString() });
+    await processor.tick();
+    expect(store.get(receipt.eventId)?.status).toBe('imported');
+    expect(imported[1]?.transactions[0]?.payee).toBe('transfer:alrajhi-checking-id');
+  });
+
+  it.each(['debit-first', 'receipt-first'])(
+    'does not duplicate a linked repayment when both SMS sides arrive (%s)',
+    async (order) => {
+      const defaultAccount = funding();
+      const { store, imported, processor } = setup({
+        creditCardPaymentFundingAccount: defaultAccount,
+        accounts: config.accounts.map((account) =>
+          account.key === 'credit-card'
+            ? { ...account, match: { ...account.match, transferIdentifiers: ['2393'] } }
+            : account,
+        ),
+      });
+      const debit = {
+        ...receipt,
+        eventId: 'checking-debit',
+        message: 'Outgoing transfer From: 7404 To: 2393 Amount: SAR 80.50 On: 2026-11-05 21:56:00',
+      };
+      const rows = order === 'debit-first' ? [debit, receipt] : [receipt, debit];
+      for (const row of rows) {
+        store.enqueue(row);
+        await processor.tick();
+        // A later settings change must not reinterpret an already imported receipt.
+        if (row.eventId === receipt.eventId) defaultAccount.id = 'payroll-id';
+      }
+      expect(store.get(debit.eventId)?.status).toBe('imported');
+      expect(store.get(receipt.eventId)?.status).toBe('imported');
+      expect(imported).toHaveLength(1);
+      expect(imported[0]).toMatchObject(
+        order === 'debit-first'
+          ? {
+              account: 'alrajhi-checking-id',
+              transactions: [{ amount: -8050, payee: 'transfer:credit-card-id' }],
+            }
+          : {
+              account: 'credit-card-id',
+              transactions: [{ amount: 8050, payee: 'transfer:alrajhi-checking-id' }],
+            },
+      );
+    },
+  );
+});
 
 describe('processor transfer routing', () => {
   it('imports a salary transfer into the account named by its To field', async () => {
@@ -143,6 +309,27 @@ describe('processor transfer routing', () => {
         transactions: [expect.objectContaining({ amount: 77998, payee_name: 'Bank transfer' })],
       },
     ]);
+  });
+
+  it('imports an Arabic credit-card payment receipt as a card credit without an expense category', async () => {
+    const { store, imported, processor } = setup();
+    const id = store.enqueue({
+      eventId: 'arabic-credit-card-payment-received',
+      sender: 'AlRajhiBank',
+      message: 'بطاقة فيزا:سداد بـSR 80.50 \\nعبر2393;فيزا\\nرصيد:1200.1 SR \\n؜5/11/26 21:56',
+      receivedAt: '2026-11-05T18:56:40.094Z',
+    }).id;
+
+    await processor.tick();
+
+    expect(store.get(id)?.status).toBe('imported');
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.account).toBe('credit-card-id');
+    expect(imported[0]?.transactions).toEqual([
+      expect.objectContaining({ amount: 8050, payee_name: 'Bank transfer' }),
+    ]);
+    expect(imported[0]?.transactions[0]).not.toHaveProperty('category');
+    expect(store.enrichmentAttempts(id).at(-1)).toMatchObject({ status: 'not_applicable' });
   });
 
   it('routes SAB Arabic POS purchases using the Mada Atheer card suffix', async () => {

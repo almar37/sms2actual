@@ -10,6 +10,8 @@ const kind = z.enum([
   'transfer_in',
   'transfer_out',
   'card_payment',
+  'deposit',
+  'fee',
 ]);
 const reason = z.enum([
   'otp_or_login',
@@ -55,7 +57,19 @@ const schema = z
           .array(z.object({ value: reason, patterns: z.array(pattern).min(1) }).strict())
           .min(1),
         kinds: z
-          .array(z.object({ value: kind, patterns: z.array(pattern).min(1) }).strict())
+          .array(
+            z
+              .object({
+                value: kind,
+                patterns: z.array(pattern).min(1),
+                cardPaymentReceived: z.boolean().optional(),
+              })
+              .strict()
+              .refine(
+                (rule) => !rule.cardPaymentReceived || rule.value === 'transfer_in',
+                'Card payment receipts must be incoming transfers',
+              ),
+          )
           .min(1),
         fields,
       })
@@ -67,10 +81,15 @@ const schema = z
             id: z.string().min(1),
             match: z.array(pattern).min(1),
             kind,
+            cardPaymentReceived: z.boolean().optional(),
             fields,
             required: z.array(field).default([]),
           })
-          .strict(),
+          .strict()
+          .refine(
+            (template) => !template.cardPaymentReceived || template.kind === 'transfer_in',
+            'Card payment receipts must be incoming transfers',
+          ),
       )
       .default([]),
   })
@@ -79,13 +98,14 @@ export type CompiledFields = Partial<Record<Field, readonly RegExp[]>>;
 export interface ParserConfig {
   shared: {
     ignored: { value: z.infer<typeof reason>; patterns: RegExp[] }[];
-    kinds: { value: z.infer<typeof kind>; patterns: RegExp[] }[];
+    kinds: { value: z.infer<typeof kind>; patterns: RegExp[]; cardPaymentReceived?: boolean }[];
     fields: CompiledFields;
   };
   templates: {
     id: string;
     match: RegExp[];
     kind: z.infer<typeof kind>;
+    cardPaymentReceived?: boolean;
     fields: CompiledFields;
     required: Field[];
   }[];

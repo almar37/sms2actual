@@ -1,7 +1,16 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { ConsoleConfig, consoleSettingsSchema } from './console-config.js';
+import { createConsoleAuth } from './console-auth.js';
+import { ConfigurableEnricher } from './provider-enricher.js';
 import { loadParserConfig } from './parsing/config.js';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { loadBankConfigFile, loadConfigFile, loadEnv } from './config.js';
+import {
+  loadBankConfigFile,
+  loadConfigFile,
+  loadEnv,
+  resolveCreditCardPaymentFundingAccount,
+} from './config.js';
 import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
 import { reportActualCompatibility } from './actual-version.js';
@@ -50,19 +59,54 @@ try {
     banks,
     parsing,
     accounts: resolvedAccounts,
+    creditCardPaymentFundingAccount: resolveCreditCardPaymentFundingAccount(
+      accounts,
+      file.creditCardPaymentFundingAccount,
+    ),
     bankFeesCategoryId: fee[0]!.id,
     eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),
   };
-  const ai = env.OPENCODE_GO_API_KEY
+  const secret =
+    env.AUTH_SECRET ?? createHash('sha256').update(`sms2actual:${env.API_KEY}`).digest('hex');
+  const consoleSettings = new ConsoleConfig(store, secret);
+  const saved = consoleSettings.get('routing');
+  if (saved) {
+    const settings = consoleSettingsSchema.parse(saved);
+    if (settings.accounts.some((a) => !accounts.some((current) => current.id === a.id)))
+      throw new Error('A saved account is no longer open in Actual');
+    if (
+      !categories.some((c) => c.id === settings.bankFeesCategoryId) ||
+      settings.eligibleCategoryIds.some((id) => !categories.some((c) => c.id === id))
+    )
+      throw new Error('A saved category is missing in Actual');
+    consoleSettings.apply(settings, config, categories);
+  }
+  if (!consoleSettings.get('taskerKey'))
+    consoleSettings.set(
+      'taskerKey',
+      consoleSettings.encrypt(randomBytes(32).toString('base64url')),
+    );
+  const auth = await createConsoleAuth(store, env.PUBLIC_URL, secret, env.TRUSTED_ORIGINS);
+  const fallbackAi = env.OPENCODE_GO_API_KEY
     ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
     : new NoopEnricher();
+  if (!consoleSettings.get('ai') && env.OPENCODE_GO_API_KEY)
+    consoleSettings.saveAi({
+      provider: 'opencode',
+      model: env.OPENCODE_GO_MODEL,
+      apiKey: env.OPENCODE_GO_API_KEY,
+      minConfidence: env.ENRICHMENT_MIN_CONFIDENCE,
+    });
+  const ai = new ConfigurableEnricher(consoleSettings, fallbackAi);
   const processor = new Processor(
     store,
     actual,
     ai,
     config,
     env.MAX_ATTEMPTS,
-    env.ENRICHMENT_MIN_CONFIDENCE,
+    consoleSettings.get('ai') ? consoleSettings.ai().minConfidence : env.ENRICHMENT_MIN_CONFIDENCE,
+    undefined,
+    consoleSettings,
   );
   await processor
     .refreshMappings()
@@ -78,6 +122,15 @@ try {
     processor,
     ready: () => ready,
     logger: env.LOG_LEVEL,
+    console: {
+      auth,
+      settings: consoleSettings,
+      actual,
+      config,
+      publicUrl: env.PUBLIC_URL,
+      trustedOrigins: env.TRUSTED_ORIGINS,
+      enricher: ai,
+    },
   });
   const mappingRefresh = setInterval(
     () =>

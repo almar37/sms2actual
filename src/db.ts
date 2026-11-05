@@ -46,6 +46,7 @@ export interface InboxSyncEntry {
   row: InboxSyncRow;
   input?: SmsInput;
   skipped?: Extract<InboxSyncOutcome, 'unsupported' | 'empty'>;
+  retainIgnored?: boolean;
 }
 
 export class EventStore {
@@ -140,10 +141,16 @@ export class EventStore {
             outcome: entry.skipped!,
           };
         const enqueued = this.enqueueInTransaction(entry.input);
+        if (entry.retainIgnored && !enqueued.duplicate)
+          this.update(enqueued.id, 'ignored', { parserReason: 'unsupported_sender' });
         return {
           rowId: entry.row.rowId,
           date: entry.row.date,
-          outcome: (enqueued.duplicate ? 'duplicate' : 'queued') as InboxSyncOutcome,
+          outcome: (entry.retainIgnored
+            ? 'unsupported'
+            : enqueued.duplicate
+              ? 'duplicate'
+              : 'queued') as InboxSyncOutcome,
           eventId: enqueued.id,
         };
       });

@@ -91,6 +91,7 @@ export const smsFixtures = [
     'Credit Card: Credited\nDear Customer,\nSAB Visa Cashback Credit Card (***8501) was credited with SAR 237.70 on: 2026-09-30 10:30:34\nBalance: SAR 49900.00',
     transaction('sab', {
       kind: 'transfer_in',
+      cardPaymentReceived: true,
       accountAlias: '8501',
       amountCents: 23770,
       principalCents: 23770,
@@ -215,6 +216,7 @@ export const smsFixtures = [
     'Credit Card:Payment\nCard:Visa 2393\nAmount:SR 779.98\nBalance:27105.03 SR\n5/9/26 8:44',
     transaction('alrajhi', {
       kind: 'transfer_in',
+      cardPaymentReceived: true,
       accountAlias: '2393',
       amountCents: 77998,
       principalCents: 77998,

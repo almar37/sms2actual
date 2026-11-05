@@ -5,6 +5,30 @@ import type { AppConfigFile, BankConfig } from './types.js';
 
 const envSchema = z.object({
   API_KEY: z.string().min(16),
+  PUBLIC_URL: z.string().url().default('http://localhost:3000'),
+  AUTH_SECRET: z.string().min(32).optional(),
+  TRUSTED_ORIGINS: z
+    .string()
+    .default('')
+    .transform((value) =>
+      value
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    )
+    .pipe(
+      z.array(
+        z
+          .string()
+          .url()
+          .refine(
+            (value) =>
+              new URL(value).origin === value &&
+              ['http:', 'https:'].includes(new URL(value).protocol),
+            'Use exact HTTP or HTTPS origins without paths',
+          ),
+      ),
+    ),
   ACTUAL_SERVER_URL: z.string().url(),
   ACTUAL_PASSWORD: z.string().min(1),
   ACTUAL_SYNC_ID: z.string().min(1),
@@ -51,6 +75,8 @@ const fileSchema = z.object({
                   'transfer_in',
                   'transfer_out',
                   'card_payment',
+                  'deposit',
+                  'fee',
                 ]),
               )
               .min(1)
@@ -67,12 +93,24 @@ const fileSchema = z.object({
       }),
     )
     .min(1),
+  creditCardPaymentFundingAccount: z.string().min(1).optional(),
   bankFeesCategory: z.string().min(1),
   eligibleCategories: z.array(z.string()).optional(),
 });
 export type Env = z.infer<typeof envSchema>;
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   return envSchema.parse(source);
+}
+
+export function resolveCreditCardPaymentFundingAccount(
+  accounts: { id: string; name: string }[],
+  name?: string,
+): { id: string; name: string } | undefined {
+  if (name === undefined) return;
+  const matches = accounts.filter((account) => account.name === name);
+  if (matches.length !== 1)
+    throw new Error(`Credit-card payment funding account must resolve exactly once: ${name}`);
+  return matches[0]!;
 }
 function overlap<T>(a: T | undefined, b: T | undefined, shared: (x: T, y: T) => boolean) {
   return a === undefined || b === undefined || shared(a, b);

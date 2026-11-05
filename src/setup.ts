@@ -11,6 +11,18 @@ import type { AppConfigFile } from './types.js';
 
 type Choice = { name: string };
 
+export async function chooseCreditCardPaymentFundingAccount(
+  accounts: Choice[],
+  choose: (label: string, choices: Choice[]) => Promise<Choice>,
+): Promise<string | undefined> {
+  const unspecified = { name: 'No default (record the card credit only)' };
+  const selection = await choose(
+    'Choose the funding account for credit-card repayments when the SMS omits it:',
+    [unspecified, ...accounts],
+  );
+  return selection === unspecified ? undefined : selection.name;
+}
+
 export function encodeEnvValue(value: string): string {
   if (/^[A-Za-z0-9_./:@+-]*$/.test(value)) return value;
   return JSON.stringify(value);
@@ -238,6 +250,13 @@ async function main() {
     }
     validateAccountRules(mappings);
 
+    console.log(
+      '\nA funding default creates a linked transfer when a card repayment SMS omits the source account.',
+    );
+    const creditCardPaymentFundingAccount = await chooseCreditCardPaymentFundingAccount(
+      accounts,
+      choose,
+    );
     const bankFees = await choose('Choose the bank-fees category:', categories);
     const eligible = await chooseMany(
       'Choose categories eligible for merchant enrichment:',
@@ -247,6 +266,7 @@ async function main() {
     const apiKey = randomBytes(32).toString('base64url');
     const config: AppConfigFile = {
       accounts: mappings,
+      ...(creditCardPaymentFundingAccount ? { creditCardPaymentFundingAccount } : {}),
       bankFeesCategory: bankFees.name,
       eligibleCategories: eligible.map((category) => category.name),
     };

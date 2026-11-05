@@ -1,3 +1,9 @@
+import staticFiles from '@fastify/static';
+import rateLimit from '@fastify/rate-limit';
+import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { registerConsole, type ConsoleOptions } from './console.js';
+import { registerConsoleAuth, secureEqual } from './console-auth.js';
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { InboxCheckpointConflict, type EventStore } from './db.js';
@@ -95,13 +101,21 @@ export function buildServer(options: {
   processor: Processor;
   ready: () => boolean;
   logger?: boolean | string;
+  console?: ConsoleOptions;
 }) {
   const app = Fastify({
+    rewriteUrl: (req) => (req.url ?? '/').replace(/^\/api\/v1(?=\/|$)/, '/v1'),
     logger: options.logger
       ? {
           level: typeof options.logger === 'string' ? options.logger : 'info',
           redact: [
             'req.headers.x-api-key',
+            'req.headers.cookie',
+            'req.headers.authorization',
+            'res.headers.set-cookie',
+            'req.body.password',
+            'req.body.setupKey',
+            'req.body.apiKey',
             'req.body.message',
             'req.body.events[*].message',
             'req.body.rows[*].message',
@@ -110,12 +124,53 @@ export function buildServer(options: {
       : false,
     bodyLimit: 24 * 1024,
   });
+  if (options.console) app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
   app.get('/healthz', async () => ({ status: 'ok' }));
   app.get('/readyz', async (_req, reply) =>
     options.ready() ? { status: 'ready' } : reply.code(503).send({ status: 'not_ready' }),
   );
   app.addHook('onRequest', async (req, reply) => {
     if (req.url === '/healthz' || req.url === '/readyz') return;
+    if (options.console) {
+      const path = req.url.split('?')[0]!;
+      if (
+        !['GET', 'HEAD', 'OPTIONS'].includes(req.method) &&
+        (path.startsWith('/api/console/') || path.startsWith('/api/auth/'))
+      ) {
+        if (
+          typeof req.headers.origin !== 'string' ||
+          ![
+            new URL(options.console.publicUrl).origin,
+            ...(options.console.trustedOrigins ?? []),
+          ].includes(req.headers.origin)
+        )
+          return reply.code(403).send({ error: 'Invalid request origin' });
+      }
+      if (path.startsWith('/api/console/') || path.startsWith('/api/auth/')) return;
+      if (
+        (req.method === 'GET' || req.method === 'HEAD') &&
+        (path === '/' || path === '/logo.svg' || path.startsWith('/assets/'))
+      )
+        return;
+      const encrypted = options.console.settings.get<string>('taskerKey');
+      const taskerKey = encrypted ? options.console.settings.decrypt(encrypted) : '';
+      if (taskerKey && secureEqual(req.headers['x-api-key'], taskerKey)) {
+        if (
+          req.method === 'POST' &&
+          [
+            '/v1/sms',
+            '/v1/sms/batch',
+            '/v1/inbox-sync/start',
+            '/v1/inbox-sync/batch',
+            '/v1/inbox-sync/rewind',
+          ].includes(path)
+        )
+          return;
+        return reply
+          .code(403)
+          .send({ error: 'Tasker credentials can only submit SMS and sync the inbox' });
+      }
+    }
     const supplied = req.headers['x-api-key'];
     let valid = false;
     if (typeof supplied === 'string' && supplied.length === options.apiKey.length) {
@@ -214,10 +269,11 @@ export function buildServer(options: {
         const message = row.message?.trim();
         if (!message) return { row, skipped: 'empty' as const };
         const source = resolveSmsSource(row.sender ?? '', message, options.banks);
-        if (source.type === 'unsupported' && source.disposition === 'ignored')
+        if (source.type === 'unsupported' && source.disposition === 'ignored' && !options.console)
           return { row, skipped: 'unsupported' as const };
         return {
           row,
+          retainIgnored: source.type === 'unsupported' && source.disposition === 'ignored',
           input: {
             eventId: `inbox-v2-${row.date}-${row.rowId}`,
             ...(row.sender ? { sender: row.sender } : {}),
@@ -329,5 +385,36 @@ export function buildServer(options: {
       updatedAt: e.updated_at,
     };
   });
+  if (options.console) {
+    const consoleOptions = options.console;
+    registerConsoleAuth(
+      app,
+      consoleOptions.auth,
+      options.store,
+      options.apiKey,
+      consoleOptions.publicUrl,
+    );
+    registerConsole(app, consoleOptions, options.store, options.processor);
+    app.addHook('onResponse', async (req, reply) => {
+      if (req.method === 'POST' && req.url.startsWith('/v1/') && reply.statusCode < 300)
+        consoleOptions.settings.set('lastTaskerSync', new Date().toISOString());
+    });
+    app.addHook('onSend', async (_req, reply) => {
+      reply
+        .header('x-content-type-options', 'nosniff')
+        .header('x-frame-options', 'DENY')
+        .header('referrer-policy', 'no-referrer')
+        .header('cache-control', 'no-store')
+        .header(
+          'content-security-policy',
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        );
+    });
+    const root = resolve('dist/web');
+    if (existsSync(root)) {
+      app.register(staticFiles, { root, prefix: '/', index: false });
+      app.get('/', async (_req, reply) => reply.sendFile('index.html'));
+    }
+  }
   return app;
 }

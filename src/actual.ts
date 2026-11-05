@@ -40,6 +40,10 @@ export class ActualApiAdapter implements ActualAdapter {
       .filter((a) => !a.closed)
       .map((a) => ({ id: a.id, name: a.name }));
   }
+  async accountBalance(accountId: string) {
+    const actual = await loadActualApi();
+    return actual.getAccountBalance(accountId);
+  }
   async categories() {
     const actual = await loadActualApi();
     const groups = await actual.getCategories();
@@ -51,11 +55,25 @@ export class ActualApiAdapter implements ActualAdapter {
       hidden: Boolean((c as any).hidden),
     }));
   }
-  async transactions(accountId: string, startDate: string, endDate: string) {
+  async transactions(accountId: string, startDate: string, endDate: string, limit?: number) {
     const actual = await loadActualApi();
     const payees = new Map((await actual.getPayees()).map((payee) => [payee.id, payee.name]));
-    return (await actual.getTransactions(accountId, startDate, endDate)).map((transaction) => ({
+    const rows = limit
+      ? (
+          (await actual.aqlQuery(
+            actual
+              .q('transactions')
+              .filter({ account: accountId, date: { $gte: startDate, $lte: endDate } })
+              .select('*')
+              .options({ splits: 'grouped' })
+              .orderBy([{ date: 'desc' }, { id: 'desc' }])
+              .limit(limit),
+          )) as { data: Awaited<ReturnType<typeof actual.getTransactions>> }
+        ).data
+      : await actual.getTransactions(accountId, startDate, endDate);
+    return rows.map((transaction) => ({
       id: transaction.id,
+      amount: transaction.amount,
       accountId: transaction.account,
       date: transaction.date,
       payeeName: transaction.payee ? payees.get(transaction.payee) : undefined,

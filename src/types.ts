@@ -25,7 +25,14 @@ export interface InboxSyncRow {
 }
 export type InboxSyncOutcome = 'queued' | 'duplicate' | 'unsupported' | 'empty';
 export type TxKind =
-  'purchase' | 'refund' | 'withdrawal' | 'transfer_in' | 'transfer_out' | 'card_payment';
+  | 'purchase'
+  | 'refund'
+  | 'withdrawal'
+  | 'transfer_in'
+  | 'transfer_out'
+  | 'card_payment'
+  | 'deposit'
+  | 'fee';
 export type Bank = string;
 export interface BankConfig {
   id: Bank;
@@ -52,6 +59,11 @@ export interface ParsedTransaction {
   transferCounterpartyAlias?: string;
   /** Identifier extracted specifically from a Biller/مفوتر field. */
   billPaymentIdentifier?: string;
+  /** The notification confirms a repayment received by the credit card. */
+  cardPaymentReceived?: boolean;
+  /** Snapshot of the configured funding default used for this payment. */
+  assumedFundingAccountId?: string;
+  explicitTransferAccountId?: string;
 }
 
 export interface AccountConfig {
@@ -69,6 +81,7 @@ export interface AccountConfig {
 }
 export interface AppConfigFile {
   accounts: AccountConfig[];
+  creditCardPaymentFundingAccount?: string;
   bankFeesCategory: string;
   eligibleCategories?: string[];
 }
@@ -76,11 +89,13 @@ export interface ResolvedConfig {
   banks: BankConfig[];
   parsing: import('./parsing/config.js').ParserConfig;
   accounts: ResolvedAccount[];
+  creditCardPaymentFundingAccount?: { id: string; name: string };
   bankFeesCategoryId: string;
   eligibleCategories: { id: string; name: string }[];
 }
 export interface ResolvedAccount {
   key: string;
+  fundingAccountId?: string;
   id: string;
   name: string;
   match: AccountConfig['match'];
@@ -112,6 +127,7 @@ export interface HistoricalTransaction {
   categoryId?: string;
   importedId?: string;
   transferId?: string;
+  amount?: number;
 }
 export interface ImportResult {
   added: string[];
@@ -125,10 +141,12 @@ export interface ActualAdapter {
   sync(): Promise<void>;
   accounts(): Promise<{ id: string; name: string }[]>;
   categories(): Promise<ActualCategory[]>;
+  accountBalance?(accountId: string): Promise<number>;
   transactions(
     accountId: string,
     startDate: string,
     endDate: string,
+    limit?: number,
   ): Promise<HistoricalTransaction[]>;
   transferPayee(accountId: string): Promise<string>;
   importTransactions(accountId: string, transactions: ActualTransaction[]): Promise<ImportResult>;

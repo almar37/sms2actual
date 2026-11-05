@@ -1,9 +1,10 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
-COPY package*.json ./
+COPY package*.json .npmrc ./
 RUN npm ci
-COPY tsconfig.json ./
+COPY tsconfig.json vite.config.ts svelte.config.js ./
+COPY web ./web
 COPY src ./src
 RUN npm run build
 RUN npm prune --omit=dev
@@ -14,9 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certifi
 WORKDIR /app
 COPY package*.json ./
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist/src ./dist
+COPY --from=build /app/dist ./dist
+COPY tasker ./tasker
 RUN mkdir -p /data /actual-cache && chown node:node /data /actual-cache
 USER node
 EXPOSE 3000
 ENTRYPOINT ["tini","--"]
-CMD ["node","dist/main.js"]
+CMD ["node","dist/src/main.js"]

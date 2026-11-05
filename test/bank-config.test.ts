@@ -219,4 +219,17 @@ describe('YAML bank registry', () => {
     const banks = parseBankConfig({ banks: [{ ...bank, disposition: 'needs_review' }] });
     await expect(loadConfigFile(path, banks)).rejects.toThrow('review-only bank');
   });
+
+  it('loads an optional repayment funding default without requiring an SMS route for it', async () => {
+    const banks = parseBankConfig({ banks: [bank] });
+    const path = await writeConfig(
+      'accounts.yaml',
+      `${accountYaml()}creditCardPaymentFundingAccount: Other Checking\n`,
+    );
+    const config = await loadConfigFile(path, banks);
+    expect(config.creditCardPaymentFundingAccount).toBe('Other Checking');
+    expect(config.accounts).toHaveLength(1);
+    const legacy = await loadConfigFile(await writeConfig('accounts.yaml', accountYaml()), banks);
+    expect(legacy.creditCardPaymentFundingAccount).toBeUndefined();
+  });
 });

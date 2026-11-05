@@ -123,3 +123,50 @@ describe('Al Rajhi compact online purchases', () => {
     expect(parse(sms!)).toStrictEqual({ type: 'needs_review', reason: 'malformed_notification' });
   });
 });
+
+describe('Al Rajhi compact credit-card payment receipts', () => {
+  const message = 'بطاقة فيزا:سداد بـSR 80.50 \\nعبر2393;فيزا\\nرصيد:1200.1 SR \\n؜5/11/26 21:56';
+  const receivedAt = '2026-11-05T18:56:40.094Z';
+  const parse = (sms: string) => parseSms(sms, receivedAt, banks, 'AlRajhiBank', parsing);
+
+  it.each([
+    ['literal newline escapes', message],
+    ['newlines', message.replaceAll('\\n', '\n')],
+    ['CRLF', message.replaceAll('\\n', '\r\n')],
+    ['Arabic digits', message.replace('80.50', '٨٠٫٥٠').replace('2393', '٢٣٩٣')],
+    ['no balance', message.replace('رصيد:1200.1 SR', '')],
+  ])('credits the card without inventing a funding account with %s', (_name, sms) => {
+    expect(parse(sms!)).toMatchObject({
+      type: 'transaction',
+      transaction: {
+        bank: 'alrajhi',
+        kind: 'transfer_in',
+        cardPaymentReceived: true,
+        accountAlias: '2393',
+        amountCents: 8050,
+        principalCents: 8050,
+        feeCents: 0,
+        transferCounterpartyAlias: undefined,
+        payee: 'Bank transfer',
+        occurredAt: '2026-11-05T21:56:00.000+03:00',
+      },
+    });
+  });
+
+  it.each([
+    ['missing amount', message.replace('SR 80.50', 'SR')],
+    ['foreign amount', message.replace('SR 80.50', 'USD 80.50')],
+    ['invalid amount', message.replace('80.50', '80.501')],
+    ['missing card', message.replace('2393', '')],
+    ['invalid card', message.replace('2393', '239312345')],
+  ])('holds a receipt with %s for review', (_name, sms) => {
+    expect(parse(sms!)).toStrictEqual({ type: 'needs_review', reason: 'malformed_notification' });
+  });
+
+  it('does not mark an ordinary deposit as a credit-card repayment', () => {
+    const result = parse('Incoming transfer To: 2393 Amount: SAR 80.50 Balance: SAR 1200.10');
+    expect(result).toMatchObject({ type: 'transaction', transaction: { kind: 'transfer_in' } });
+    if (result.type === 'transaction')
+      expect(result.transaction.cardPaymentReceived).toBeUndefined();
+  });
+});

@@ -121,7 +121,8 @@ export function parseSms(
                 : raw !== undefined && raw !== '';
     if (!valid) return { type: 'needs_review', reason: 'malformed_notification' };
   }
-  const kind = template?.kind ?? classify(text, config.shared.kinds);
+  const kindRule = config.shared.kinds.find((rule) => matches(text, rule.patterns));
+  const kind = template?.kind ?? kindRule?.value;
   if (!kind) return { type: 'needs_review', reason: 'unrecognized_template' };
 
   const biller = extractBiller(text);
@@ -134,7 +135,7 @@ export function parseSms(
   if (sar === undefined && !foreign)
     return { type: 'needs_review', reason: 'malformed_notification' };
 
-  const positive = kind === 'refund' || references.incoming;
+  const positive = kind === 'refund' || kind === 'deposit' || references.incoming;
   const merchant =
     kind.includes('transfer') || kind === 'card_payment'
       ? undefined
@@ -172,6 +173,7 @@ export function parseSms(
       note: `Parsed ${bank} ${kind}`,
       transferCounterpartyAlias: references.transferCounterpartyAlias,
       billPaymentIdentifier: biller.identifier,
+      ...((template ?? kindRule)?.cardPaymentReceived ? { cardPaymentReceived: true } : {}),
     },
   };
 }

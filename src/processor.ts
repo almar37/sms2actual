@@ -1,3 +1,5 @@
+import { matchMessageTemplate, type ConsoleConfig } from './console-config.js';
+import { resolveSmsSource } from './sms-source.js';
 import { createHash } from 'node:crypto';
 import { DateTime } from 'luxon';
 import type {
@@ -7,6 +9,7 @@ import type {
   ResolvedConfig,
   SmsInput,
   AiSuggestion,
+  ActualTransaction,
 } from './types.js';
 import { EventStore, type StoredEvent } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
@@ -43,9 +46,16 @@ export class Processor {
     private maxAttempts = 5,
     private minConfidence = 0.7,
     merchantResolver?: MerchantResolver,
+    private consoleConfig?: ConsoleConfig,
   ) {
     this.merchantResolver =
       merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
+  }
+  isBusy() {
+    return this.running;
+  }
+  setMinConfidence(value: number) {
+    this.minConfidence = value;
   }
   refreshMappings() {
     return this.merchantResolver.refresh();
@@ -83,15 +93,110 @@ export class Processor {
       this.running = false;
     }
   }
+  private transferTarget(tx: ParsedTransaction) {
+    if (tx.explicitTransferAccountId)
+      return (
+        this.config.accounts.find((a) => a.id === tx.explicitTransferAccountId) ?? {
+          id: tx.explicitTransferAccountId,
+          key: tx.explicitTransferAccountId,
+        }
+      );
+    if (tx.billPaymentIdentifier)
+      return resolveBillPaymentAccount(this.config.accounts, tx.billPaymentIdentifier);
+    if (tx.transferCounterpartyAlias)
+      return resolveTransferAccount(this.config.accounts, tx.transferCounterpartyAlias);
+    if (tx.kind === 'transfer_in' && tx.cardPaymentReceived && tx.assumedFundingAccountId)
+      return (
+        this.config.accounts.find((account) => account.id === tx.assumedFundingAccountId) ?? {
+          key: tx.assumedFundingAccountId,
+          id: tx.assumedFundingAccountId,
+        }
+      );
+    return undefined;
+  }
+  private async importTransactions(accountId: string, transactions: ActualTransaction[]) {
+    const imported = await this.actual.importTransactions(accountId, transactions);
+    if (imported.errors.length)
+      throw new Error(imported.errors.map((error) => error.message).join('; '));
+    return imported;
+  }
+  private observeCreditLimit(input: SmsInput, eventId: string) {
+    if (!this.consoleConfig) return;
+    const source = resolveSmsSource(input.sender ?? '', input.message, this.config.banks);
+    if (source.type === 'unsupported') return;
+    const limit =
+      /(?:credit\s+limit|الحد\s+الائتماني|حد\s+ائتماني)\s*[:：]?\s*(?:SAR|SR|ر\.س)?\s*([\d٠-٩][\d٠-٩,.]*)/iu.exec(
+        input.message,
+      );
+    if (!limit) return;
+    const normalize = (value: string) =>
+      value.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632));
+    const alias = this.config.parsing.shared.fields.accountAlias
+      ?.map((r) => r.exec(input.message)?.groups?.value)
+      .find(Boolean);
+    if (!alias) return;
+    const accounts = this.config.accounts.filter(
+      (a) => a.match.bank === source.bank && a.match.accountSuffixes?.includes(normalize(alias)),
+    );
+    const ids = [...new Set(accounts.map((a) => a.id))];
+    if (
+      ids.length !== 1 ||
+      this.consoleConfig.seed(this.config).accounts.find((a) => a.id === ids[0])?.type !== 'credit'
+    )
+      return;
+    const cents = Math.round(Number(normalize(limit[1]!).replaceAll(',', '')) * 100);
+    const previous = this.consoleConfig.get<{ observedAt: string }>(`limit:${ids[0]}`);
+    if (
+      Number.isSafeInteger(cents) &&
+      cents > 0 &&
+      (!previous || Date.parse(previous.observedAt) <= Date.parse(input.receivedAt))
+    )
+      this.consoleConfig.set(`limit:${ids[0]}`, { cents, eventId, observedAt: input.receivedAt });
+  }
   private async process(event: StoredEvent) {
     const input = JSON.parse(event.payload!) as SmsInput;
-    const result = parseSms(
+    this.observeCreditLimit(input, event.id);
+    let result = parseSms(
       input.message,
       input.receivedAt,
       this.config.banks,
       input.sender,
       this.config.parsing,
     );
+    const manualRow = this.store.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='console_overrides'")
+      .get()
+      ? (this.store.db
+          .prepare('SELECT value FROM console_overrides WHERE event_id=?')
+          .get(event.id) as { value: string } | undefined)
+      : undefined;
+    const manual = manualRow
+      ? (JSON.parse(manualRow.value) as {
+          transaction: ParsedTransaction;
+          accountId: string;
+          categoryId?: string;
+          merchant?: string;
+        })
+      : undefined;
+    let templateCategory: string | undefined;
+    if (manual) result = { type: 'transaction', transaction: manual.transaction };
+    else if (this.consoleConfig) {
+      const source = resolveSmsSource(input.sender ?? '', input.message, this.config.banks);
+      if (source.type !== 'unsupported') {
+        const templates = this.consoleConfig
+          .templates()
+          .map((t) => ({
+            template: t,
+            transaction: matchMessageTemplate(t, input.message, input.receivedAt, source.bank),
+          }))
+          .filter((t) => t.transaction);
+        if (templates.length > 1) result = { type: 'needs_review', reason: 'ambiguous_template' };
+        else if (templates[0]?.transaction) {
+          result = { type: 'transaction', transaction: templates[0].transaction };
+          templateCategory = templates[0].template.categoryId;
+        }
+      }
+    }
     if (result.type === 'ignored' || result.type === 'needs_review') {
       this.store.recordEnrichment(event.id, 'not_applicable', {
         reason: result.type,
@@ -104,18 +209,36 @@ export class Processor {
       return;
     }
     const tx = result.transaction;
-    const account = resolveAccount(this.config.accounts, tx);
+    const account = manual
+      ? this.config.accounts.find((a) => a.id === manual.accountId)
+      : resolveAccount(this.config.accounts, tx);
     if (!account)
       throw new Error(
         `Unmapped account route: ${tx.bank}${tx.accountAlias ? ` suffix ${tx.accountAlias}` : ''}`,
       );
+    if (
+      tx.kind === 'transfer_in' &&
+      tx.cardPaymentReceived &&
+      !tx.transferCounterpartyAlias &&
+      !tx.billPaymentIdentifier
+    ) {
+      const previous = event.parsed ? (JSON.parse(event.parsed) as ParsedTransaction) : undefined;
+      // Preserve the first decision across retries, including no default.
+      const fundingId = previous
+        ? previous.assumedFundingAccountId
+        : (account.fundingAccountId ?? this.config.creditCardPaymentFundingAccount?.id);
+      if (fundingId === account.id)
+        throw new Error('Credit-card payment funding account must differ from the card account');
+      if (fundingId) tx.assumedFundingAccountId = fundingId;
+    }
     let review = false;
     if (tx.balanceCents !== undefined) {
       if (tx.amountCents === null && tx.foreign) {
         const previous = this.store.previousBalance(account.key, tx.occurredAt);
         if (previous !== undefined) {
           const delta = tx.balanceCents - previous;
-          const positive = tx.kind === 'refund' || tx.kind === 'transfer_in';
+          const positive =
+            tx.kind === 'refund' || tx.kind === 'transfer_in' || tx.kind === 'deposit';
           if (delta !== 0 && delta > 0 === positive) tx.amountCents = delta;
           else review = true;
         } else review = true;
@@ -130,8 +253,11 @@ export class Processor {
     const isTransfer = ['transfer_in', 'transfer_out', 'card_payment'].includes(tx.kind);
     let suggestion: AiSuggestion | null = null;
     let selectedPayee = tx.payee;
-    let selectedCategory: string | undefined;
-    if (!isTransfer && tx.kind !== 'withdrawal') {
+    let selectedCategory: string | undefined =
+      manual?.categoryId ??
+      templateCategory ??
+      (tx.kind === 'fee' ? this.config.bankFeesCategoryId : undefined);
+    if (!isTransfer && tx.kind !== 'withdrawal' && !selectedCategory) {
       const mapping = this.merchantResolver.lookup(account.id, tx.payee);
       if (mapping) {
         selectedPayee = mapping.payee;
@@ -190,11 +316,20 @@ export class Processor {
       }
     } else {
       this.store.recordEnrichment(event.id, 'not_applicable', {
-        reason: isTransfer ? 'transfer' : 'withdrawal',
+        reason: selectedCategory ? 'user_category' : isTransfer ? 'transfer' : 'withdrawal',
         kind: tx.kind,
       });
     }
-    const date = DateTime.fromISO(tx.occurredAt).toISODate()!;
+    if (manual?.categoryId && !isTransfer)
+      this.store.putLocalMapping({
+        account_id: account.id,
+        merchant_key: merchantKey(manual.merchant ?? tx.payee),
+        payee: tx.payee,
+        category_id: manual.categoryId,
+        source_ref: `console-review:${event.id}`,
+        decision_at: new Date().toISOString(),
+      });
+    const date = DateTime.fromISO(tx.occurredAt, { setZone: true }).toISODate()!;
     const notes = [
       tx.note,
       tx.foreign ? `${tx.foreign.amount} ${tx.foreign.currency}` : '',
@@ -215,14 +350,8 @@ export class Processor {
             this.store.get(candidate.event_id)!.parsed!,
           ) as ParsedTransaction;
           if (!['transfer_in', 'transfer_out', 'card_payment'].includes(prior.kind)) return false;
-          const targetOf = (value: ParsedTransaction) =>
-            value.billPaymentIdentifier
-              ? resolveBillPaymentAccount(this.config.accounts, value.billPaymentIdentifier)
-              : value.transferCounterpartyAlias
-                ? resolveTransferAccount(this.config.accounts, value.transferCounterpartyAlias)
-                : undefined;
-          const currentTarget = targetOf(tx);
-          const priorTarget = targetOf(prior);
+          const currentTarget = this.transferTarget(tx);
+          const priorTarget = this.transferTarget(prior);
           if (currentTarget && currentTarget.key !== candidate.source_alias) return false;
           if (priorTarget && priorTarget.key !== account.key) return false;
           return currentTarget !== undefined || priorTarget !== undefined;
@@ -230,13 +359,7 @@ export class Processor {
       const counterpartTx = counterpart
         ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
         : undefined;
-      const counterpartTarget = counterpartTx
-        ? counterpartTx.billPaymentIdentifier
-          ? resolveBillPaymentAccount(this.config.accounts, counterpartTx.billPaymentIdentifier)
-          : counterpartTx.transferCounterpartyAlias
-            ? resolveTransferAccount(this.config.accounts, counterpartTx.transferCounterpartyAlias)
-            : undefined
-        : undefined;
+      const counterpartTarget = counterpartTx ? this.transferTarget(counterpartTx) : undefined;
       if (counterpart && counterpartTarget) {
         this.store.recordTransfer(
           event.id,
@@ -252,18 +375,12 @@ export class Processor {
       // A counterpart already imported without a transfer payee covers only
       // its own account. Import this side independently to avoid crediting
       // that account again through Actual's linked transfer.
-      const target = counterpart
-        ? undefined
-        : tx.billPaymentIdentifier
-          ? resolveBillPaymentAccount(this.config.accounts, tx.billPaymentIdentifier)
-          : tx.transferCounterpartyAlias
-            ? resolveTransferAccount(this.config.accounts, tx.transferCounterpartyAlias)
-            : undefined;
+      const target = counterpart ? undefined : this.transferTarget(tx);
       if (target) {
         const payee = await this.actual.transferPayee(target.id);
         const principal =
           tx.principalCents ?? (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents);
-        await this.actual.importTransactions(account.id, [
+        const imported = await this.importTransactions(account.id, [
           {
             date,
             amount: principal,
@@ -272,8 +389,10 @@ export class Processor {
             imported_id: stableId(tx, account.key, 'principal'),
           },
         ]);
+        const actualTransactionId = imported.added[0] ?? imported.updated[0];
+        if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
         if (tx.feeCents)
-          await this.actual.importTransactions(account.id, [
+          await this.importTransactions(account.id, [
             {
               date,
               amount: -tx.feeCents,
@@ -291,15 +410,28 @@ export class Processor {
           tx.occurredAt,
         );
       } else {
-        await this.actual.importTransactions(account.id, [
+        const imported = await this.importTransactions(account.id, [
           {
             date,
-            amount: tx.amountCents,
+            amount: manual && tx.feeCents ? (tx.principalCents ?? tx.amountCents) : tx.amountCents,
             payee_name: tx.payee,
             notes,
             imported_id: stableId(tx, account.key),
           },
         ]);
+        const actualTransactionId = imported.added[0] ?? imported.updated[0];
+        if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
+        if (manual && tx.feeCents)
+          await this.importTransactions(account.id, [
+            {
+              date,
+              amount: -tx.feeCents,
+              payee_name: 'Bank Fees',
+              category: this.config.bankFeesCategoryId,
+              notes,
+              imported_id: stableId(tx, account.key, 'fee'),
+            },
+          ]);
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -310,7 +442,7 @@ export class Processor {
         );
       }
     } else {
-      const imported = await this.actual.importTransactions(account.id, [
+      const imported = await this.importTransactions(account.id, [
         {
           date,
           amount: tx.amountCents,
@@ -321,8 +453,6 @@ export class Processor {
           imported_id: stableId(tx, account.key),
         },
       ]);
-      if (imported.errors.length)
-        throw new Error(imported.errors.map((error) => error.message).join('; '));
       const actualTransactionId = imported.added[0] ?? imported.updated[0];
       if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
     }
