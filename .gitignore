@@ -15,3 +15,4 @@ transfer/
 runtime-secrets.json
 compose.override.yaml
 compose.tailscale.yaml
+AGENTS.md
