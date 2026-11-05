@@ -253,7 +253,7 @@
             >
           </div>{/if}
         {#if catalog}
-          {#if catalog.connection && !catalog.connection.connected}
+          {#if catalog.connection && !catalog.connection.connected && !['settings', 'tasker'].includes(page)}
             <div class="page-heading">
               <div>
                 <span class="eyebrow">LET’S CONNECT YOUR BUDGET</span>
@@ -266,7 +266,11 @@
               >Refresh connection status</button
             >
           {:else}
-            {#if catalog.connection && !catalog.connection.ready}<div class="info-box">
+            {#if catalog.connection && !catalog.connection.connected}<div class="info-box">
+                Actual is not connected. Messages stay queued until you connect your budget in
+                Settings.
+              </div>
+            {:else if catalog.connection && !catalog.connection.ready}<div class="info-box">
                 Your budget is connected. Choose an account and a Bank Fees category in <button
                   class="text-button"
                   onclick={() => navigate('accounts')}>Accounts &amp; cards</button

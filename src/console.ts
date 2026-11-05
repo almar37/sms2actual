@@ -60,6 +60,25 @@ export function registerConsole(
   });
   const validateCategory = async (id?: string) =>
     !id || (await options.actual.categories()).some((c) => c.id === id && !c.hidden);
+  app.post('/api/console/data/reset', async (req, reply) => {
+    const body = z
+      .object({ confirmation: z.literal('RESET') })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success)
+      return reply.code(400).send({ error: 'Type RESET to confirm clearing SMS and logs' });
+    // Keep this check and the transaction synchronous so a new queue claim cannot
+    // start between them. An in-flight import must finish before it can be erased.
+    if (processor.isBusy?.())
+      return reply
+        .code(409)
+        .send({ error: 'A message is being processed. Try the reset again in a moment.' });
+    return store.db.transaction(() => {
+      const result = store.resetSmsData();
+      options.settings.clearSmsState();
+      return result;
+    })();
+  });
   app.get(
     '/api/console/actual',
     async () =>

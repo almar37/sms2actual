@@ -102,6 +102,12 @@ export class ConsoleConfig {
       )
       .run(key, JSON.stringify(value));
   }
+  clearSmsState() {
+    this.store.db.prepare('DELETE FROM console_overrides').run();
+    this.store.db
+      .prepare("DELETE FROM console_settings WHERE key='lastTaskerSync' OR key LIKE 'limit:%'")
+      .run();
+  }
   seed(config: ResolvedConfig): ConsoleSettings {
     return (
       this.get<ConsoleSettings>('routing') ?? {

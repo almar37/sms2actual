@@ -144,6 +144,34 @@ export class EventStore {
       return { checkpoint, changed };
     })();
   }
+  resetSmsData(nowMillis = Date.now()) {
+    return this.db.transaction(() => {
+      const deletedMessages = this.db.prepare('SELECT COUNT(*) count FROM events').get() as {
+        count: number;
+      };
+      const deletedHistory = this.db.prepare('SELECT COUNT(*) count FROM event_history').get() as {
+        count: number;
+      };
+      const deletedEnrichmentAttempts = this.db
+        .prepare('SELECT COUNT(*) count FROM enrichment_attempts')
+        .get() as { count: number };
+      for (const table of [
+        'event_history',
+        'enrichment_attempts',
+        'balances',
+        'transfers',
+        'events',
+      ])
+        this.db.prepare(`DELETE FROM ${table}`).run();
+      const { checkpoint } = this.setInboxCheckpoint(nowMillis, this.inboxCheckpoint() ?? null);
+      return {
+        deletedMessages: deletedMessages.count,
+        deletedHistory: deletedHistory.count,
+        deletedEnrichmentAttempts: deletedEnrichmentAttempts.count,
+        checkpoint,
+      };
+    })();
+  }
   commitInboxBatch(expected: InboxCheckpoint, entries: InboxSyncEntry[]) {
     return this.db.transaction(() => {
       const current = this.inboxCheckpoint();

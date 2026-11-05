@@ -199,10 +199,21 @@ try {
   await expect(page.getByLabel(/^API key/)).toHaveCount(0);
   await page.getByRole('button', { name: 'Create workspace' }).click();
   await expect(page.getByRole('heading', { name: 'Actual server connection' })).toBeVisible();
+  await page.getByRole('link', { name: 'Tasker connection', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Inbox checkpoint' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save checkpoint', exact: true })).toBeEnabled();
+  expect(store.inboxCheckpoint()).toBeUndefined();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Hard reset SMS & logs', exact: true }),
+  ).toBeVisible();
+
   await page.getByLabel(/^Actual server URL/).fill('http://actual:5006');
   await page.getByLabel('Actual server password', { exact: true }).fill('fake-actual-password');
   await page.getByLabel(/^Budget Sync ID/).fill('fake-budget-id');
   await page.getByRole('button', { name: 'Connect Actual', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Actual connected');
+  await page.getByRole('link', { name: 'Overview', exact: true }).click();
 
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Everyday account' })).toBeVisible();
@@ -323,6 +334,11 @@ try {
   await page.getByRole('link', { name: 'Tasker connection', exact: true }).click();
   await expect(saveCheckpoint).toBeEnabled();
   expect(store.inboxCheckpoint()).toEqual(chosenCheckpoint);
+  await page.screenshot({
+    path: `${artifactDir}/tasker-checkpoint.png`,
+    fullPage: true,
+    animations: 'disabled',
+  });
   await page.getByLabel('Public service URL').fill('https://sms.example.test');
   await page.getByRole('button', { name: 'Replace credential' }).click();
   const download = page.waitForEvent('download');
@@ -339,6 +355,36 @@ try {
     fullPage: true,
     animations: 'disabled',
   });
+  const messagesBeforeReset = store.list({ limit: 50 }).length;
+  await page.getByRole('button', { name: 'Hard reset SMS & logs', exact: true }).click();
+  const resetDialog = page.getByRole('dialog', { name: 'Reset SMS and logs', exact: true });
+  const confirmReset = resetDialog.getByRole('button', {
+    name: 'Permanently reset SMS and logs',
+    exact: true,
+  });
+  await expect(confirmReset).toBeDisabled();
+  await resetDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(store.list({ limit: 50 })).toHaveLength(messagesBeforeReset);
+  await page.getByRole('button', { name: 'Hard reset SMS & logs', exact: true }).click();
+  await resetDialog.getByLabel('Type RESET to confirm').fill('RESET');
+  await page.screenshot({
+    path: `${artifactDir}/reset-confirmation.png`,
+    fullPage: true,
+    animations: 'disabled',
+  });
+  const resetStarted = Date.now();
+  await confirmReset.click();
+  await expect(resetDialog).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText(`Cleared ${messagesBeforeReset} messages`);
+  expect(store.list({ limit: 50 })).toEqual([]);
+  expect(store.inboxCheckpoint()!.date).toBeGreaterThanOrEqual(resetStarted);
+  expect(settings.templates()).toHaveLength(1);
+  expect(settings.ai().provider).toBe('openai');
+  await page.getByRole('link', { name: 'SMS inbox', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Your inbox is ready.' })).toBeVisible();
+  await page.getByRole('link', { name: 'Overview', exact: true }).click();
+  await expect(page.getByText('Updated from Actual', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await page.getByLabel('Current password').fill('testpass');
   await page.getByLabel(/^New password/).fill('newpass8');
   await page.getByRole('button', { name: 'Update password' }).click();
@@ -364,7 +410,7 @@ try {
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
-    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
+    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, confirmed SMS/log reset, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
   );
 } finally {
   await browser?.close();

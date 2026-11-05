@@ -114,7 +114,11 @@ async function server(signedIn = true, trustedOrigins: string[] = [], onboarding
     apiKey,
     banks,
     store: f.store,
-    processor: { tick: async () => {}, setMinConfidence: () => {} } as unknown as Processor,
+    processor: {
+      tick: async () => {},
+      setMinConfidence: () => {},
+      isBusy: () => f.processor.isBusy(),
+    } as unknown as Processor,
     ready: () => true,
     console: {
       auth,
@@ -267,6 +271,193 @@ describe('web onboarding', () => {
         })
       ).statusCode,
     ).toBe(400);
+    await app.close();
+  });
+});
+
+describe('SMS and logs hard reset', () => {
+  it('clears local SMS and logs, moves the checkpoint to now, and retains settings and Actual data', async () => {
+    const { app, headers, store, settings, config, actual, imports } = await server();
+    settings.set('routing', settings.seed(config));
+    settings.set('actualConnection', settings.encrypt('saved-actual-credentials'));
+    settings.set('taskerKey', settings.encrypt('saved-tasker-key'));
+    settings.saveAi({
+      provider: 'openai',
+      model: 'test-model',
+      apiKey: 'saved-ai-key',
+      minConfidence: 0.7,
+    });
+    settings.set('templates', [{ id: 'saved-template', sample: 'Saved SMS template' }]);
+    settings.set('lastTaskerSync', now);
+    settings.set('limit:credit', { cents: 100000, eventId: 'sms-imported' });
+    const retainedSettings = store.db
+      .prepare(
+        "SELECT key,value FROM console_settings WHERE key NOT LIKE 'limit:%' AND key!='lastTaskerSync' ORDER BY key",
+      )
+      .all();
+    const retainedOwner = store.db
+      .prepare('SELECT id,userId,password FROM account ORDER BY id')
+      .all();
+    const checkpoint = store.startInboxSync(Date.now() - 10000);
+    for (const [id, status] of [
+      ['sms-imported', 'imported'],
+      ['sms-queued', 'queued'],
+      ['sms-failed', 'failed'],
+    ] as const) {
+      store.enqueue({ eventId: id, sender: 'SAB', message: `Private SMS ${id}`, receivedAt: now });
+      store.update(id, status);
+      store.recordEnrichment(id, 'success', { response: 'Private AI log' });
+    }
+    store.addBalance('checking', now, 10000, 'sms-imported');
+    store.recordTransfer('sms-imported', 'checking', 'credit', -100, now);
+    store.db
+      .prepare('INSERT INTO console_overrides(event_id,value) VALUES(?,?)')
+      .run('sms-queued', JSON.stringify({ merchant: 'Private review' }));
+    store.putLocalMapping({
+      account_id: 'checking',
+      merchant_key: 'saved merchant',
+      payee: 'Saved merchant',
+      category_id: 'food',
+      source_ref: 'manual-rule',
+      decision_at: now,
+    });
+    const sync = vi.spyOn(actual, 'sync');
+    const history = vi.spyOn(actual, 'transactions');
+    const before = Date.now();
+    const result = await app.inject({
+      method: 'POST',
+      url: '/api/console/data/reset',
+      headers,
+      payload: { confirmation: 'RESET' },
+    });
+    expect(result.statusCode, result.body).toBe(200);
+    expect(result.json()).toMatchObject({
+      deletedMessages: 3,
+      deletedEnrichmentAttempts: 3,
+      checkpoint: { rowId: 0 },
+    });
+    expect(result.json().deletedHistory).toBeGreaterThanOrEqual(3);
+    expect(result.json().checkpoint.date).toBeGreaterThanOrEqual(before);
+    expect(result.json().checkpoint.date).toBeLessThanOrEqual(Date.now());
+    for (const table of [
+      'events',
+      'event_history',
+      'enrichment_attempts',
+      'balances',
+      'transfers',
+      'console_overrides',
+    ]) {
+      expect(
+        (store.db.prepare(`SELECT COUNT(*) count FROM ${table}`).get() as { count: number }).count,
+        table,
+      ).toBe(0);
+    }
+    expect(store.db.prepare('SELECT key,value FROM console_settings ORDER BY key').all()).toEqual(
+      retainedSettings,
+    );
+    expect(store.db.prepare('SELECT id,userId,password FROM account ORDER BY id').all()).toEqual(
+      retainedOwner,
+    );
+    expect(store.mapping('checking', 'saved merchant')?.payee).toBe('Saved merchant');
+    expect(sync).not.toHaveBeenCalled();
+    expect(history).not.toHaveBeenCalled();
+    expect(imports).not.toHaveBeenCalled();
+    expect((await app.inject({ url: '/api/console/settings', headers })).statusCode).toBe(200);
+    const stale = await app.inject({
+      method: 'POST',
+      url: '/api/v1/inbox-sync/batch',
+      headers: { 'x-api-key': apiKey },
+      payload: {
+        checkpoint,
+        rows: [
+          { rowId: 1, date: checkpoint.date + 1, sender: 'SAB', message: 'Old pending batch' },
+        ],
+      },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(store.list({ limit: 10 })).toEqual([]);
+    await app.close();
+  });
+  it('requires owner authentication, same-origin requests, and the exact reset confirmation', async () => {
+    const { app, headers, store } = await server();
+    store.enqueue({ eventId: 'kept', sender: 'SAB', message: 'Keep this SMS', receivedAt: now });
+    for (const confirmation of [undefined, '', 'reset', 'DELETE']) {
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/console/data/reset',
+            headers,
+            payload: { confirmation },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/data/reset',
+          headers: { origin, 'x-api-key': apiKey },
+          payload: { confirmation: 'RESET' },
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/data/reset',
+          headers: { cookie: headers.cookie, origin: 'https://evil.test' },
+          payload: { confirmation: 'RESET' },
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(store.get('kept')).toBeDefined();
+    await app.close();
+  });
+  it('refuses a reset while an import is in progress', async () => {
+    const { app, headers, store, processor } = await server();
+    store.enqueue({
+      eventId: 'processing',
+      sender: 'SAB',
+      message: 'Keep this SMS',
+      receivedAt: now,
+    });
+    store.update('processing', 'processing');
+    vi.spyOn(processor, 'isBusy').mockReturnValue(true);
+    const result = await app.inject({
+      method: 'POST',
+      url: '/api/console/data/reset',
+      headers,
+      payload: { confirmation: 'RESET' },
+    });
+    expect(result.statusCode).toBe(409);
+    expect(store.get('processing')?.status).toBe('processing');
+    await app.close();
+  });
+  it('rolls back the entire reset if clearing review data fails', async () => {
+    const { app, headers, store, settings } = await server();
+    store.enqueue({ eventId: 'kept', sender: 'SAB', message: 'Keep this SMS', receivedAt: now });
+    store.recordEnrichment('kept', 'success', { response: 'Keep this AI log' });
+    const checkpoint = store.startInboxSync(Date.now() - 10000);
+    settings.set('lastTaskerSync', now);
+    store.db.prepare('INSERT INTO console_overrides(event_id,value) VALUES(?,?)').run('kept', '{}');
+    store.db.exec(
+      "CREATE TRIGGER fail_reset BEFORE DELETE ON console_overrides BEGIN SELECT RAISE(ABORT,'injected reset failure'); END",
+    );
+    const result = await app.inject({
+      method: 'POST',
+      url: '/api/console/data/reset',
+      headers,
+      payload: { confirmation: 'RESET' },
+    });
+    expect(result.statusCode).toBe(500);
+    expect(store.get('kept')).toBeDefined();
+    expect(store.eventHistory('kept')).toHaveLength(1);
+    expect(store.enrichmentAttempts('kept')).toHaveLength(1);
+    expect(store.inboxCheckpoint()).toEqual(checkpoint);
+    expect(settings.get('lastTaskerSync')).toBe(now);
     await app.close();
   });
 });

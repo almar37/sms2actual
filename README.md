@@ -103,9 +103,15 @@ For LAN access without a proxy, set `BIND_ADDRESS` to the host's LAN IP, `PUBLIC
 - **Merchants and templates:** remember category corrections and teach unfamiliar message formats.
 - **AI categorization:** optional OpenCode Go, OpenAI, or Anthropic credentials and model settings. History is checked before AI is called.
 - **Tasker connection:** choose where SMS sync starts, move the saved checkpoint backward or forward, download the configured Android project, reveal its SMS key, or replace that credential.
-- **Settings:** Actual connection, password changes, and browser sessions.
+- **Settings:** Actual connection, password changes, browser sessions, and a confirmed hard reset for local SMS and logs.
 
 The Tasker key is separate from any optional legacy `.env` `API_KEY`. It can submit SMS and sync the inbox. Replacing it requires downloading and importing a new Tasker project. Normal UI setup does not need the legacy key.
+
+### Clear SMS and logs
+
+Open **Settings → Hard reset SMS & logs**, then type `RESET` in the confirmation dialog. This deletes stored messages (including queued messages), processing history, AI logs, review overrides, and message-derived balances, transfer matches, and detected limits. The inbox checkpoint moves to the reset time, so the next Tasker sync starts there.
+
+Your workspace password, connections, account/category mappings, templates, merchant rules, and transactions in Actual are retained. A reset waits for you to retry if a message is currently being processed. You can choose another checkpoint afterward in **Tasker connection**.
 
 ## Data, backups, and updates
 

@@ -3,6 +3,7 @@
   import { api, when, localDateInput } from './api.js';
   import Icon from './Icon.svelte';
   import ActualConnection from './ActualConnection.svelte';
+  import { modal } from './modal.js';
   let {
     catalog,
     notify,
@@ -28,6 +29,33 @@
     checkpointLoading = $state(true),
     checkpointLoaded = $state(false),
     checkpointBusy = $state(false);
+  let resetOpen = $state(false),
+    resetConfirmation = $state(''),
+    resetBusy = $state(false),
+    resetError = $state('');
+  function closeReset() {
+    resetOpen = false;
+    resetConfirmation = '';
+    resetError = '';
+  }
+  async function resetSmsData(event: SubmitEvent) {
+    event.preventDefault();
+    if (resetConfirmation !== 'RESET' || resetBusy) return;
+    resetBusy = true;
+    resetError = '';
+    try {
+      const result = await api('/api/console/data/reset', { confirmation: resetConfirmation });
+      closeReset();
+      await refresh().catch(() => {});
+      notify(
+        `Cleared ${result.deletedMessages} messages and their logs. Tasker now starts from the reset time.`,
+      );
+    } catch (e) {
+      resetError = (e as Error).message;
+    } finally {
+      resetBusy = false;
+    }
+  }
   async function loadCheckpoint() {
     checkpointLoading = true;
     checkpointLoaded = false;
@@ -389,5 +417,68 @@
     </div>
     <aside>
       <ActualConnection {catalog} {notify} {refresh} />
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <h2>Hard reset SMS &amp; logs</h2>
+            <p>Clear the local inbox and processing history.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <p class="muted">
+            Deletes all stored SMS, queued messages, processing history, AI logs, and
+            message-derived balance and transfer data. The Tasker checkpoint moves to now.
+          </p>
+          <p class="muted small">
+            Your password, connections, account mappings, templates, merchant rules, and
+            transactions in Actual are retained.
+          </p>
+          <button class="danger" onclick={() => (resetOpen = true)}
+            >Hard reset SMS &amp; logs</button
+          >
+        </div>
+      </section>
     </aside>
   </div>{/if}
+{#if resetOpen}<dialog
+    class="modal"
+    use:modal
+    aria-label="Reset SMS and logs"
+    onclose={closeReset}
+    oncancel={(event) => {
+      if (resetBusy) event.preventDefault();
+    }}
+  >
+    <div class="drawer-heading">
+      <h2>Reset SMS and logs</h2>
+      <button
+        class="icon-button"
+        aria-label="Close reset dialog"
+        disabled={resetBusy}
+        onclick={closeReset}><Icon name="close" /></button
+      >
+    </div>
+    <form class="panel-body" onsubmit={resetSmsData}>
+      <p>
+        This permanently clears sms2actual’s SMS records and processing logs. Tasker will continue
+        from the reset time. Your settings and Actual transactions are retained.
+      </p>
+      {#if resetError}<div class="error" role="alert">{resetError}</div>{/if}
+      <label
+        >Type RESET to confirm<input
+          bind:value={resetConfirmation}
+          pattern="RESET"
+          required
+          autocomplete="off"
+          spellcheck={false}
+          disabled={resetBusy}
+        /></label
+      >
+      <div class="form-actions">
+        <button type="button" onclick={closeReset} disabled={resetBusy}>Cancel</button>
+        <button class="danger" disabled={resetBusy || resetConfirmation !== 'RESET'}
+          >{resetBusy ? 'Resetting…' : 'Permanently reset SMS and logs'}</button
+        >
+      </div>
+    </form>
+  </dialog>{/if}

@@ -66,7 +66,7 @@ A category is applied only when confidence meets `ENRICHMENT_MIN_CONFIDENCE`, wh
 
 ### What stays on your server
 
-The SQLite database keeps raw SMS, any supplied location, status changes, mapping decisions, enrichment attempts, and import outcomes indefinitely for authenticated review. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.
+The SQLite database keeps raw SMS, any supplied location, status changes, mapping decisions, enrichment attempts, and import outcomes for authenticated review until you explicitly clear SMS and logs in Settings. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.
 
 ### What gets imported
 
