@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OpenCodeGoEnricher, OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../src/enricher.js';
+import { OpenCodeGoEnricher } from '../src/enricher.js';
 
 const input = {
   merchant: 'SAMPLE BOOKS',
@@ -16,7 +16,7 @@ function completion(content: unknown, status = 200) {
 }
 
 describe('OpenCode Go enricher', () => {
-  it('calls Chat Completions in JSON mode and accepts an eligible category', async () => {
+  it('requests JSON without the unsupported JSON-mode parameter and accepts an eligible category', async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(
       completion({
         payee: 'Sample Books',
@@ -25,9 +25,11 @@ describe('OpenCode Go enricher', () => {
         reason: 'Known retailer',
       }),
     );
-    const result = await new OpenCodeGoEnricher('secret-key', 'deepseek-v4-flash', request).enrich(
-      input,
-    );
+    const result = await new OpenCodeGoEnricher(
+      'secret-key',
+      'deepseek-v4.1-flash',
+      request,
+    ).enrich(input);
 
     expect(result).toMatchObject({
       status: 'success',
@@ -35,13 +37,40 @@ describe('OpenCode Go enricher', () => {
     });
     expect(request).toHaveBeenCalledOnce();
     const [url, init] = request.mock.calls[0]!;
-    expect(url).toBe(OPENCODE_GO_CHAT_COMPLETIONS_URL);
-    expect(init?.headers).toMatchObject({ authorization: 'Bearer secret-key' });
+    expect(url).toBe('https://opencode.ai/inference/go/openai/v1/chat/completions');
+    expect(init?.headers).toMatchObject({
+      authorization: 'Bearer secret-key',
+      'user-agent': 'actual-sms/1.0.0',
+      'x-opencode-session': expect.any(String),
+    });
     const body = JSON.parse(String(init?.body));
     expect(body).toMatchObject({
-      model: 'deepseek-v4-flash',
-      response_format: { type: 'json_object' },
+      model: 'deepseek-v4.1-flash',
     });
+    expect(body).not.toHaveProperty('response_format');
+    expect(body.messages[0].content).toContain('Return only JSON');
+  });
+
+  it('keeps a stable routing session per client without using credentials or merchant data', async () => {
+    const request = vi.fn<typeof fetch>().mockImplementation(async () =>
+      completion({
+        payee: 'Sample Books',
+        categoryId: 'cat-shopping',
+        confidence: 0.96,
+        reason: 'Known retailer',
+      }),
+    );
+    const client = new OpenCodeGoEnricher('secret-key', 'deepseek-v4.1-flash', request);
+    await client.enrich(input);
+    await client.enrich({ ...input, merchant: 'OTHER BOOKS' });
+    await new OpenCodeGoEnricher('secret-key', 'deepseek-v4.1-flash', request).enrich(input);
+
+    const sessions = request.mock.calls.map(([, init]) =>
+      new Headers(init?.headers).get('x-opencode-session'),
+    );
+    expect(sessions[0]).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+    expect(sessions[1]).toBe(sessions[0]);
+    expect(sessions[2]).not.toBe(sessions[0]);
   });
 
   it.each([
@@ -64,7 +93,9 @@ describe('OpenCode Go enricher', () => {
     ['provider failure', completion({}, 500)],
   ])('records a failed result for %s', async (_name, response) => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(response);
-    const result = await new OpenCodeGoEnricher('key', 'deepseek-v4-flash', request).enrich(input);
+    const result = await new OpenCodeGoEnricher('key', 'deepseek-v4.1-flash', request).enrich(
+      input,
+    );
     expect(result.status).not.toBe('success');
   });
 
@@ -77,7 +108,7 @@ describe('OpenCode Go enricher', () => {
       });
     });
     await expect(
-      new OpenCodeGoEnricher('key', 'deepseek-v4-flash', request, 5).enrich(input),
+      new OpenCodeGoEnricher('key', 'deepseek-v4.1-flash', request, 5).enrich(input),
     ).resolves.toMatchObject({ status: 'timeout' });
   });
 
@@ -90,7 +121,7 @@ describe('OpenCode Go enricher', () => {
         reason: 'x',
       }),
     );
-    await new OpenCodeGoEnricher('key', 'deepseek-v4-flash', request).enrich(input);
+    await new OpenCodeGoEnricher('key', 'deepseek-v4.1-flash', request).enrich(input);
     const body = JSON.parse(String(request.mock.calls[0]![1]?.body));
     const outbound = JSON.parse(body.messages[1].content);
 
@@ -109,7 +140,7 @@ describe.skipIf(!live)('OpenCode Go live smoke test', () => {
   it('returns a valid suggestion', async () => {
     const result = await new OpenCodeGoEnricher(
       process.env.OPENCODE_GO_API_KEY!,
-      process.env.OPENCODE_GO_MODEL ?? 'deepseek-v4-flash',
+      process.env.OPENCODE_GO_MODEL ?? 'deepseek-v4.1-flash',
     ).enrich(input);
     expect(result.status).toBe('success');
   }, 30_000);

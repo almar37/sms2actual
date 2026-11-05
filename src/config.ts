@@ -10,7 +10,7 @@ const envSchema = z.object({
   ACTUAL_SYNC_ID: z.string().min(1),
   ACTUAL_ENCRYPTION_PASSWORD: z.string().optional(),
   OPENCODE_GO_API_KEY: z.string().optional(),
-  OPENCODE_GO_MODEL: z.string().default('deepseek-v4-flash'),
+  OPENCODE_GO_MODEL: z.string().default('deepseek-v4.1-flash'),
   CONFIG_PATH: z.string().default('/config/accounts.yaml'),
   BANKS_CONFIG_PATH: z.string().default('/config/banks.yaml'),
   PARSING_CONFIG_PATH: z.string().default('/config/parsing.yaml'),

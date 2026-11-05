@@ -276,7 +276,7 @@ Before asking AI for help, the service looks for an exact match on the normalize
 
 If there's no match and you've configured `OPENCODE_GO_API_KEY`, the service asks OpenCode Go for a merchant name and category suggestion. It sends only normalized merchant text, optional exact location/time context, and the configured eligible category IDs and names. It doesn't send raw SMS, balances, account suffixes, aliases, or unrelated personal data.
 
-The default model is `deepseek-v4-flash`; change it with `OPENCODE_GO_MODEL`. Requests use OpenCode's OpenAI-compatible Chat Completions endpoint in JSON-only mode, and responses are validated locally. This step uses the model without web search.
+The default model is `deepseek-v4.1-flash`; change it with `OPENCODE_GO_MODEL`. Requests use OpenCode's OpenAI-compatible Chat Completions endpoint with a JSON-only prompt, and responses are validated locally. The provider's JSON-mode parameter is omitted because the current Flash backend rejects it. This step uses the model without web search.
 
 A category is applied only when confidence meets `ENRICHMENT_MIN_CONFIDENCE`, which defaults to `0.70`. A lower-confidence suggestion may still clean up the payee name. Provider failures, invalid output, quota limits, rate limits, and timeouts don't prevent an otherwise valid transaction from importing. Sanitized requests, responses, timings, outcomes, and failure details are saved in the event audit.
 

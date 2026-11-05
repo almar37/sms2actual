@@ -257,7 +257,7 @@ async function main() {
       ACTUAL_SYNC_ID: syncId,
       ACTUAL_ENCRYPTION_PASSWORD: encryptionPassword,
       OPENCODE_GO_API_KEY: openCodeKey,
-      OPENCODE_GO_MODEL: 'deepseek-v4-flash',
+      OPENCODE_GO_MODEL: 'deepseek-v4.1-flash',
       CONFIG_PATH: '/config/accounts.yaml',
       BANKS_CONFIG_PATH: '/config/banks.yaml',
       PARSING_CONFIG_PATH: '/config/parsing.yaml',

@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Enricher, EnrichmentResult } from './types.js';
 
-export const OPENCODE_GO_CHAT_COMPLETIONS_URL = 'https://opencode.ai/zen/go/v1/chat/completions';
+export const OPENCODE_GO_CHAT_COMPLETIONS_URL =
+  'https://opencode.ai/inference/go/openai/v1/chat/completions';
 
 const resultSchema = z.object({
   payee: z.string().min(1).max(100),
@@ -15,6 +17,8 @@ const responseSchema = z.object({
 });
 
 export class OpenCodeGoEnricher implements Enricher {
+  private readonly sessionId = randomUUID();
+
   constructor(
     private key: string,
     private model: string,
@@ -32,16 +36,17 @@ export class OpenCodeGoEnricher implements Enricher {
         headers: {
           authorization: `Bearer ${this.key}`,
           'content-type': 'application/json',
+          'user-agent': 'actual-sms/1.0.0',
+          'x-opencode-session': this.sessionId,
         },
         signal: controller.signal,
         body: JSON.stringify({
           model: this.model,
-          response_format: { type: 'json_object' },
           messages: [
             {
               role: 'system',
               content:
-                'Normalize the merchant and select exactly one category ID from the supplied categories. Use location and transaction time only to disambiguate. Return only JSON with payee, categoryId, confidence, and reason.',
+                'Normalize the merchant and select exactly one category ID from the supplied categories. Use location and transaction time only to disambiguate. Return only JSON with payee, categoryId, confidence, and reason. Do not use Markdown or code fences.',
             },
             {
               role: 'user',
