@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { api, setUnauthorizedHandler } from './api.js';
   import Icon from './Icon.svelte';
+  import { modal } from './modal.js';
+  let menuOpen = $state(false);
   import Overview from './Overview.svelte';
   import SmsLog from './SmsLog.svelte';
   import Accounts from './Accounts.svelte';
@@ -47,6 +49,7 @@
     toastTimer = setTimeout(() => (toast = ''), 4500);
   }
   function navigate(id: string) {
+    menuOpen = false;
     page = id;
     location.hash = id;
   }
@@ -92,6 +95,7 @@
   async function logout() {
     try {
       await api('/api/auth/sign-out', {});
+      menuOpen = false;
       signedIn = false;
       catalog = null;
     } catch (e) {
@@ -100,15 +104,22 @@
   }
   onMount(() => {
     setUnauthorizedHandler(() => {
+      menuOpen = false;
       signedIn = false;
     });
     void initialize();
     const connectionTimer = setInterval(() => {
       if (signedIn && catalog?.connection?.connecting) void refreshCatalog().catch(() => {});
     }, 2000);
+    const desktop = matchMedia('(min-width: 721px)');
+    const closeMobileMenu = () => {
+      if (desktop.matches) menuOpen = false;
+    };
+    desktop.addEventListener('change', closeMobileMenu);
     const hash = () => (page = location.hash.slice(1) || 'overview');
     window.addEventListener('hashchange', hash);
     return () => {
+      desktop.removeEventListener('change', closeMobileMenu);
       clearTimeout(toastTimer);
       clearInterval(connectionTimer);
       window.removeEventListener('hashchange', hash);
@@ -176,7 +187,7 @@
   </main>
 {:else}
   <div class="app-shell">
-    <aside class="sidebar">
+    {#snippet sidebarContent()}
       <a class="brand" href="#overview" onclick={() => navigate('overview')}
         ><img src="/logo.svg" alt="" width="35" height="35" /><span
           >sms<span class="brand-two">2</span>actual</span
@@ -228,22 +239,31 @@
           >
         </div>
       </div>
-    </aside>
+    {/snippet}
+    <aside class="sidebar">{@render sidebarContent()}</aside>
+    {#if menuOpen}
+      <dialog
+        class="mobile-sidebar"
+        aria-label="Workspace navigation"
+        use:modal
+        onclose={() => (menuOpen = false)}
+      >
+        <button
+          class="menu-close icon-button"
+          aria-label="Close menu"
+          onclick={() => (menuOpen = false)}><Icon name="close" /></button
+        >
+        {@render sidebarContent()}
+      </dialog>
+    {/if}
     <div class="main-shell">
-      <header class="topbar">
-        <div class="breadcrumb">
-          Workspace<Icon name="chevron" size={13} /><strong>{current.label}</strong>
-        </div>
-        <div class="topbar-right">
-          <span class="private-badge"><Icon name="shield" size={14} /> Private workspace</span
-          ><button
-            class="avatar"
-            aria-label="Open security settings"
-            onclick={() => navigate('settings')}>P</button
-          >
-        </div>
-      </header>
       <main class="content">
+        <button
+          class="mobile-menu"
+          aria-haspopup="dialog"
+          aria-expanded={menuOpen}
+          onclick={() => (menuOpen = true)}><Icon name="menu" size={18} /> Menu</button
+        >
         {#if error}<div class="error" role="alert">
             {error}<button
               onclick={() => {

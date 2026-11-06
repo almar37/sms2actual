@@ -390,6 +390,7 @@ try {
   await page.getByRole('button', { name: 'Update password' }).click();
   await expect(page.getByRole('status')).toContainText('Password updated');
   await page.getByRole('link', { name: 'Overview', exact: true }).click();
+  await expect(page.locator('.topbar')).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   const notification = page.getByRole('button', { name: 'Dismiss notification' });
   if (await notification.isVisible()) await notification.click();
@@ -401,12 +402,28 @@ try {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
   );
-  await page.getByRole('button', { name: 'Sign out', exact: true }).first().click();
+  const menu = page.getByRole('button', { name: 'Menu', exact: true });
+  await menu.click();
+  const mobileNavigation = page.getByRole('dialog', { name: 'Workspace navigation' });
+  await expect(mobileNavigation).toBeVisible();
+  await expect(mobileNavigation.getByRole('link')).toHaveCount(9);
+  await mobileNavigation.getByRole('link', { name: 'SMS inbox', exact: true }).click();
+  await expect(mobileNavigation).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Your inbox is ready.' })).toBeVisible();
+  await menu.click();
+  await page.keyboard.press('Escape');
+  await expect(mobileNavigation).toHaveCount(0);
+  await expect(menu).toBeFocused();
+  await menu.click();
+  await page.screenshot({ path: `${artifactDir}/mobile-sidebar.png`, animations: 'disabled' });
+  await mobileNavigation.getByRole('button', { name: 'Sign out', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
   await expect(page.getByLabel('Email address')).toHaveCount(0);
   await expect(page.getByLabel('Username')).toHaveCount(0);
   await page.getByLabel('Password', { exact: true }).fill('newpass8');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await menu.click();
+  await mobileNavigation.getByRole('link', { name: 'Overview', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
