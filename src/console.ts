@@ -3,7 +3,13 @@ import { fromNodeHeaders } from 'better-auth/node';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { InboxCheckpointConflict, type EventStore, type StoredEvent } from './db.js';
-import type { ActualAdapter, Enricher, ResolvedConfig, ParsedTransaction } from './types.js';
+import type {
+  ActualAdapter,
+  Enricher,
+  ResolvedConfig,
+  ParsedTransaction,
+  SmsInput,
+} from './types.js';
 import type { Processor } from './processor.js';
 import {
   ConsoleConfig,
@@ -17,12 +23,13 @@ import {
 import type { ConsoleAuth } from './console-auth.js';
 import { validateAccountRules } from './config.js';
 import { merchantKey } from './merchant-resolver.js';
-import { parseSms } from './parser.js';
+import { extractReviewDraft, parseSms } from './parser.js';
 import { resolveSmsSource } from './sms-source.js';
 import { resolveTransferTarget } from './routing.js';
 import { generateTaskerProject } from './tasker-export.js';
 import { currentBudgetDate } from './budget-date.js';
 import { actualConnectionSchema, type ActualConnection } from './actual-connection.js';
+import { transactionNotes } from './transaction-notes.js';
 
 export interface ConsoleOptions {
   auth: ConsoleAuth;
@@ -315,9 +322,48 @@ export function registerConsole(
         // Ambiguous routes must remain inspectable so the owner can review them.
       }
     }
+    const input = readJson(event.payload) as SmsInput | null;
+    const reviewDraft =
+      event.status === 'needs_review' && input
+        ? extractReviewDraft(
+            input.message,
+            input.receivedAt,
+            options.config.banks,
+            input.sender ?? '',
+            options.config.parsing,
+          )
+        : null;
+    const hints = tx ?? reviewDraft;
+    const override = store.db
+      .prepare('SELECT value FROM console_overrides WHERE event_id=?')
+      .get(event.id) as { value: string } | undefined;
+    const manual = readJson(override?.value ?? null) as {
+      accountId?: string;
+      categoryId?: string;
+    } | null;
+    const manualAccount = options.config.accounts.find(
+      (account) => account.id === manual?.accountId,
+    );
+    const accounts = hints?.bank
+      ? options.config.accounts.filter(
+          (account) =>
+            account.match.bank === hints.bank &&
+            (!hints.kind ||
+              !account.match.transactionKinds?.length ||
+              account.match.transactionKinds.includes(hints.kind)) &&
+            (!hints.accountAlias || account.match.accountSuffixes?.includes(hints.accountAlias)),
+        )
+      : [];
     return {
       ...eventView(event),
+      reviewDraft,
+      sourceBank: options.config.banks.find((bank) => bank.id === hints?.bank)?.name ?? null,
+      sourceAccountId: manualAccount?.id ?? (accounts.length === 1 ? accounts[0]!.id : null),
       targetAccountId,
+      categoryId: manual?.categoryId ?? readJson(event.suggestion)?.categoryId ?? null,
+      notes: tx
+        ? transactionNotes(tx, event.status === 'imported_review')
+        : 'Reviewed in sms2actual',
       history: store.eventHistory(event.id),
       enrichmentAttempts: store.enrichmentAttempts(event.id),
     };
@@ -332,6 +378,7 @@ export function registerConsole(
       categoryId: z.string().optional(),
       targetAccountId: z.string().optional(),
       occurredAt: z.string().datetime({ offset: true }),
+      notes: z.string().max(4000).optional(),
     })
     .strict();
   app.post<{ Params: { id: string } }>('/api/console/events/:id/action', async (req, reply) => {
@@ -359,8 +406,12 @@ export function registerConsole(
         .code(409)
         .send({ error: 'This message is being processed. Refresh before reviewing it.' });
     const transfer = ['transfer_in', 'transfer_out', 'card_payment'].includes(body.kind);
-    if (transfer && body.categoryId)
-      return reply.code(400).send({ error: 'Transfers use an account instead of a category' });
+    if (transfer && body.targetAccountId && body.categoryId)
+      return reply
+        .code(400)
+        .send({ error: 'Transfers between your accounts use an account instead of a category' });
+    if (!transfer && body.targetAccountId)
+      return reply.code(400).send({ error: 'Only transfers can have a counterparty account' });
     if (!transfer && body.feeCents)
       return reply.code(400).send({
         error: 'Use fees on transfers and card payments, or map the message to a Bank fee',
@@ -376,8 +427,8 @@ export function registerConsole(
       feeCents: body.feeCents,
       payee: body.payee,
       occurredAt: body.occurredAt,
-      explicitTransferAccountId: body.targetAccountId,
-      note: 'Reviewed in sms2actual',
+      explicitTransferAccountId: transfer ? body.targetAccountId || null : undefined,
+      note: body.notes ?? 'Reviewed in sms2actual',
     };
     if (!Number.isSafeInteger(transaction.amountCents))
       return reply.code(400).send({ error: 'Amount and fees exceed the supported range' });
@@ -477,11 +528,6 @@ export function registerConsole(
         throw new Error('Choose a supported bank');
       if (!(await validateCategory(body.data.categoryId)))
         throw new Error('Choose an existing category');
-      if (
-        ['transfer_in', 'transfer_out', 'card_payment'].includes(body.data.kind) &&
-        body.data.categoryId
-      )
-        throw new Error('Transfers do not use categories');
       compileMessageTemplate(body.data.pattern);
       options.settings.set('templates', [
         ...options.settings.templates().filter((t) => t.id !== body.data.id),

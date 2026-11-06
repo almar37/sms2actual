@@ -15,6 +15,7 @@ import { EventStore, type StoredEvent } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveTransferTarget } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
+import { transactionNotes } from './transaction-notes.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 // Historical imports used the parsed SMS suffix. Keep that stable whenever a
@@ -231,13 +232,21 @@ export class Processor {
     }
     this.store.update(event.id, 'processing', { parsed: tx, parserRevision: PARSER_REVISION });
     const isTransfer = ['transfer_in', 'transfer_out', 'card_payment'].includes(tx.kind);
+    const transferTarget = isTransfer ? resolveTransferTarget(this.config.accounts, tx) : undefined;
+    const canCategorize = !transferTarget;
     let suggestion: AiSuggestion | null = null;
     let selectedPayee = tx.payee;
-    let selectedCategory: string | undefined =
-      manual?.categoryId ??
-      templateCategory ??
-      (tx.kind === 'fee' ? this.config.bankFeesCategoryId : undefined);
-    if (!isTransfer && tx.kind !== 'withdrawal' && !selectedCategory) {
+    let selectedCategory: string | undefined = canCategorize
+      ? (manual?.categoryId ??
+        templateCategory ??
+        (tx.kind === 'fee' ? this.config.bankFeesCategoryId : undefined))
+      : undefined;
+    if (
+      canCategorize &&
+      tx.kind !== 'withdrawal' &&
+      (!isTransfer || tx.payee !== 'Bank transfer') &&
+      !selectedCategory
+    ) {
       const mapping = this.merchantResolver.lookup(account.id, tx.payee);
       if (mapping) {
         selectedPayee = mapping.payee;
@@ -300,7 +309,7 @@ export class Processor {
         kind: tx.kind,
       });
     }
-    if (manual?.categoryId && !isTransfer)
+    if (manual?.categoryId && canCategorize)
       this.store.putLocalMapping({
         account_id: account.id,
         merchant_key: merchantKey(manual.merchant ?? tx.payee),
@@ -310,13 +319,7 @@ export class Processor {
         decision_at: new Date().toISOString(),
       });
     const date = DateTime.fromISO(tx.occurredAt, { setZone: true }).toISODate()!;
-    const notes = [
-      tx.note,
-      tx.foreign ? `${tx.foreign.amount} ${tx.foreign.currency}` : '',
-      review ? 'REVIEW REQUIRED' : '',
-    ]
-      .filter(Boolean)
-      .join(' | ');
+    const notes = transactionNotes(tx, review);
     if (isTransfer) {
       const counterpart = this.store
         .findTransferCounterparts(
@@ -330,7 +333,9 @@ export class Processor {
             this.store.get(candidate.event_id)!.parsed!,
           ) as ParsedTransaction;
           if (!['transfer_in', 'transfer_out', 'card_payment'].includes(prior.kind)) return false;
-          const currentTarget = resolveTransferTarget(this.config.accounts, tx);
+          if (tx.explicitTransferAccountId === null || prior.explicitTransferAccountId === null)
+            return false;
+          const currentTarget = transferTarget;
           const priorTarget = resolveTransferTarget(this.config.accounts, prior);
           if (currentTarget && currentTarget.key !== candidate.source_alias) return false;
           if (priorTarget && priorTarget.key !== account.key) return false;
@@ -357,7 +362,7 @@ export class Processor {
       // A counterpart already imported without a transfer payee covers only
       // its own account. Import this side independently to avoid crediting
       // that account again through Actual's linked transfer.
-      const target = counterpart ? undefined : resolveTransferTarget(this.config.accounts, tx);
+      const target = counterpart ? undefined : transferTarget;
       if (target) {
         const payee = await this.actual.transferPayee(target.id);
         const principal =
@@ -395,21 +400,25 @@ export class Processor {
         const imported = await this.importTransactions(account.id, [
           {
             date,
-            amount: manual && tx.feeCents ? (tx.principalCents ?? tx.amountCents) : tx.amountCents,
-            payee_name: tx.payee,
+            amount:
+              tx.principalCents ??
+              (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents),
+            payee_name: selectedPayee,
+            imported_payee: tx.payee,
+            ...(selectedCategory ? { category: selectedCategory } : {}),
             notes,
             imported_id: stableId(tx, account.key),
           },
         ]);
         const actualTransactionId = imported.added[0] ?? imported.updated[0];
         if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
-        if (manual && tx.feeCents)
+        if (tx.feeCents)
           await this.importTransactions(account.id, [
             {
               date,
               amount: -tx.feeCents,
               payee_name: 'Bank Fees',
-              category: this.config.bankFeesCategoryId,
+              ...(selectedCategory ? { category: selectedCategory } : {}),
               notes,
               imported_id: stableId(tx, account.key, 'fee'),
             },

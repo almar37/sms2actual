@@ -53,7 +53,7 @@ function decodeDate(text: string, receivedAt: string): string {
     if (date.isValid) return date.toISO()!;
   }
 
-  const slash = text.match(/(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)/)?.[1];
+  const slash = text.match(/(\d{1,2}\/\d{1,2}\/\d{1,4}(?:\s+\d{1,2}:\d{2})?)/)?.[1];
   if (slash) {
     const fullYear = slash.split(/\s/u, 1)[0]!.split('/').at(-1)?.length === 4;
     const formats = fullYear

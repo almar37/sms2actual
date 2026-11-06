@@ -53,6 +53,15 @@ settings.set('routing', {
   })),
 });
 settings.set('lastTaskerSync', new Date().toISOString());
+const reviewTransferMessage =
+  'حوالة محلية صادرةبـ200 SR\nمن1234\nلـ7001;Water Provider\nرسوم:0.29 SR\n26/11/6 14:08';
+const reviewTransferEvent = store.enqueue({
+  sender: 'SAB',
+  message: reviewTransferMessage,
+  receivedAt: '2026-11-06T14:10:00+03:00',
+});
+store.update(reviewTransferEvent.id, 'needs_review', { parserReason: 'unrecognized_template' });
+
 for (let i = 0; i < 9; i++) {
   const input = {
     eventId: `demo-${i}`,
@@ -268,6 +277,47 @@ try {
   );
   await expect(page.getByRole('button', { name: /Approve & import/ })).toBeDisabled();
   await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: reviewTransferMessage, exact: true }).click();
+  const transferReview = page.getByRole('dialog', { name: 'Review message' });
+  await expect(transferReview.getByRole('combobox', { name: /^Action/ })).toHaveValue(
+    'transfer_out',
+  );
+  await expect(transferReview.getByRole('combobox', { name: /^Account/ })).toHaveValue('checking');
+  await expect(transferReview.getByRole('spinbutton', { name: /^Amount/ })).toHaveValue('200');
+  await expect(transferReview.getByRole('spinbutton', { name: /^Fees/ })).toHaveValue('0.29');
+  await expect(transferReview.getByRole('spinbutton', { name: /^Fees/ })).toBeEnabled();
+  await expect(transferReview.getByRole('textbox', { name: /^Payee/ })).toHaveValue(
+    'Water Provider',
+  );
+  await expect(transferReview).toContainText('Source bank:');
+  const transferCategory = transferReview.getByRole('combobox', { name: /^Category/ });
+  await transferCategory.selectOption('food');
+  const transferNotes = transferReview.getByRole('textbox', { name: /^Notes/ });
+  await expect(transferNotes).toHaveValue('Reviewed in sms2actual');
+  await transferNotes.fill('Water bill\nNovember 2026');
+  await transferReview
+    .getByRole('combobox', { name: /^Counterparty account/ })
+    .selectOption('savings');
+  await expect(transferCategory).toHaveCount(0);
+  await expect(transferReview).toContainText('Fees use your Bank Fees category.');
+  await transferReview.getByRole('combobox', { name: /^Counterparty account/ }).selectOption('');
+  await expect(transferCategory).toHaveValue('food');
+  await expect(transferReview).toContainText('Fees use the same category as this transaction.');
+  await transferReview.getByRole('button', { name: /Approve & import/ }).click();
+  await expect(page.getByRole('status')).toContainText('Review saved. Message queued for import.');
+  const reviewedWater = JSON.parse(store.get(reviewTransferEvent.id)!.parsed!);
+  expect(reviewedWater.note).toBe('Water bill\nNovember 2026');
+  expect(reviewedWater.explicitTransferAccountId).toBeNull();
+  await page.getByRole('button', { name: reviewTransferMessage, exact: true }).click();
+  await expect(transferReview.getByRole('combobox', { name: /^Account/ })).toHaveValue('checking');
+  await expect(transferCategory).toHaveValue('food');
+  await expect(transferNotes).toHaveValue('Water bill\nNovember 2026');
+  await page.screenshot({
+    path: `${artifactDir}/external-transfer-review.png`,
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Unfamiliar bank message for review' }).click();
   await expect(page.getByRole('dialog', { name: 'Review message' })).toBeVisible();
   const review = page.getByRole('dialog', { name: 'Review message' });
@@ -302,7 +352,8 @@ try {
   await page.getByRole('combobox', { name: /^Bank/ }).selectOption('sab');
   await page.getByRole('combobox', { name: /^Category/ }).selectOption('food');
   await page.getByRole('combobox', { name: /^Action/ }).selectOption('transfer_out');
-  await expect(page.getByRole('combobox', { name: /^Category/ })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: /^Category/ })).toHaveValue('food');
+  await expect(page.getByRole('combobox', { name: /^Category/ })).toBeEnabled();
   await page.getByRole('combobox', { name: /^Action/ }).selectOption('purchase');
   await page.getByRole('button', { name: 'Test this example' }).click();
   await expect(page.getByText('It matches. Your template is ready.')).toBeVisible();

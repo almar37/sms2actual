@@ -1182,6 +1182,49 @@ describe('console financial safeguards', () => {
       await app.close();
     },
   );
+  it('prefills a retained review without changing its status or importing', async () => {
+    const { app, headers, store, config, imports } = await server();
+    config.accounts[1]!.match = { bank: 'alrajhi', accountSuffixes: ['7900'] };
+    const { id } = store.enqueue({
+      sender: 'AlRajhiBank',
+      message:
+        'حوالة محلية صادرةبـ200 SR\nمن7900\nلـ7001;Ammar Shehari\nرسوم:0.29 SR\n26/11/6 14:08',
+      receivedAt: '2026-11-06T14:10:00+03:00',
+    });
+    store.update(id, 'needs_review', { parserReason: 'unrecognized_template' });
+    const response = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: 'needs_review',
+      parsed: null,
+      parser_reason: 'unrecognized_template',
+      sourceAccountId: 'credit',
+      sourceBank: config.banks.find((bank) => bank.id === 'alrajhi')!.name,
+      reviewDraft: {
+        bank: 'alrajhi',
+        kind: 'transfer_out',
+        principalCents: -20000,
+        feeCents: 29,
+        payee: 'Ammar Shehari',
+      },
+    });
+    expect(store.get(id)?.status).toBe('needs_review');
+    expect(store.get(id)?.parsed).toBeNull();
+    expect(imports).not.toHaveBeenCalled();
+    await app.close();
+  });
+  it('leaves an ambiguous source account for the user to choose', async () => {
+    const { app, headers, store } = await server();
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: 'Unfamiliar notification',
+      receivedAt: now,
+    });
+    store.update(id, 'needs_review');
+    const response = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(response.json()).toMatchObject({ sourceAccountId: null, reviewDraft: { bank: 'sab' } });
+    await app.close();
+  });
   it('separates the principal and fee for a manually reviewed transfer', async () => {
     const { app, headers, store, processor, imports } = await server();
     const { id } = store.enqueue({
@@ -1213,6 +1256,296 @@ describe('console financial safeguards', () => {
       expect.objectContaining({ amount: -150, category: 'fees' }),
     ]);
     expect(store.get(id)?.status).toBe('imported');
+    await app.close();
+  });
+  it.each([
+    ['transfer_out', -20000],
+    ['transfer_in', 20000],
+  ])('categorizes a reviewed external %s and its fee together', async (kind, amount) => {
+    const { app, headers, store, processor, imports } = await server();
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: 'Unknown water transfer',
+      receivedAt: now,
+    });
+    store.update(id, 'needs_review');
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: {
+        kind,
+        accountId: 'checking',
+        amountCents: 20000,
+        feeCents: 29,
+        payee: 'Water Provider',
+        categoryId: 'food',
+        occurredAt: now,
+        notes: 'Water bill\nNovember 2026',
+      },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    await processor.tick();
+    expect(imports).toHaveBeenCalledTimes(2);
+    expect(imports).toHaveBeenNthCalledWith(1, 'checking', [
+      expect.objectContaining({
+        amount,
+        category: 'food',
+        payee_name: 'Water Provider',
+        notes: 'Water bill\nNovember 2026',
+      }),
+    ]);
+    expect(imports).toHaveBeenNthCalledWith(2, 'checking', [
+      expect.objectContaining({
+        amount: -29,
+        category: 'food',
+        payee_name: 'Bank Fees',
+        notes: 'Water bill\nNovember 2026',
+      }),
+    ]);
+    expect(imports.mock.calls[0]![1][0]).not.toHaveProperty('payee');
+    expect(store.get(id)?.status).toBe('imported');
+    const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(detail.json()).toMatchObject({
+      categoryId: 'food',
+      notes: 'Water bill\nNovember 2026',
+      targetAccountId: null,
+    });
+    expect(store.mapping('checking', 'water provider')).toMatchObject({ category_id: 'food' });
+    if (kind === 'transfer_out') {
+      const next = store.enqueue({
+        sender: 'SAB',
+        message: 'Transfer sent From: 1234 To: Water Provider Amount: SAR 210 Fees: SAR 0.29',
+        receivedAt: now,
+      });
+      await processor.tick();
+      expect(store.get(next.id)?.status).toBe('imported');
+      expect(imports.mock.calls[2]![1][0]).toMatchObject({ amount: -21000, category: 'food' });
+      expect(imports.mock.calls[3]![1][0]).toMatchObject({ amount: -29, category: 'food' });
+    }
+    await app.close();
+  });
+  it('keeps edited notes and category when retrying a failed external fee import', async () => {
+    const { app, headers, store, processor, imports } = await server();
+    imports
+      .mockResolvedValueOnce({ added: ['principal-id'], updated: [], errors: [] })
+      .mockRejectedValueOnce(new Error('Fee import failed'));
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: 'Unknown water transfer',
+      receivedAt: now,
+    });
+    store.update(id, 'needs_review');
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: {
+        kind: 'transfer_out',
+        accountId: 'checking',
+        amountCents: 20000,
+        feeCents: 29,
+        payee: 'Water Provider',
+        categoryId: 'food',
+        occurredAt: now,
+        notes: 'November water bill',
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({ status: 'queued', error: 'Fee import failed' });
+    const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(detail.json()).toMatchObject({
+      categoryId: 'food',
+      notes: 'November water bill',
+      targetAccountId: null,
+    });
+    store.update(id, 'queued', { nextAttemptAt: new Date().toISOString() });
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('imported');
+    expect(imports.mock.calls[2]![1]).toEqual(imports.mock.calls[0]![1]);
+    expect(imports.mock.calls[3]![1]).toEqual(imports.mock.calls[1]![1]);
+    await app.close();
+  });
+  it.each(['', 'My edited notes'])(
+    'preserves user notes verbatim, including an empty value (%j)',
+    async (notes) => {
+      const { app, headers, store, processor, imports } = await server();
+      const { id } = store.enqueue({ sender: 'SAB', message: 'Unknown purchase', receivedAt: now });
+      store.update(id, 'needs_review');
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/console/events/${id}/action`,
+        headers,
+        payload: {
+          kind: 'purchase',
+          accountId: 'checking',
+          amountCents: 20000,
+          payee: 'Water Provider',
+          categoryId: 'food',
+          occurredAt: now,
+          notes,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      await processor.tick();
+      expect(imports).toHaveBeenCalledWith('checking', [expect.objectContaining({ notes })]);
+      await app.close();
+    },
+  );
+  it('prefills the notes that would be imported, including foreign-currency context', async () => {
+    const { app, headers, store } = await server();
+    const { id } = store.enqueue({ sender: 'SAB', message: 'Unknown purchase', receivedAt: now });
+    store.update(id, 'failed', {
+      parsed: {
+        bank: 'sab',
+        kind: 'purchase',
+        amountCents: -20000,
+        feeCents: 0,
+        payee: 'Water Provider',
+        occurredAt: now,
+        note: 'Parsed sab purchase',
+        foreign: { currency: 'USD', amount: 53.33 },
+      },
+    });
+    const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(detail.json().notes).toBe('Parsed sab purchase | 53.33 USD');
+    await app.close();
+  });
+  it.each([
+    {
+      name: 'a category on a linked transfer',
+      fields: { categoryId: 'food', targetAccountId: 'credit' },
+    },
+    { name: 'an unknown category', fields: { categoryId: 'missing' } },
+    { name: 'overlong notes', fields: { notes: 'x'.repeat(4001) } },
+  ])('rejects $name', async ({ fields }) => {
+    const { app, headers, store, imports } = await server();
+    const { id } = store.enqueue({ sender: 'SAB', message: 'Unknown transfer', receivedAt: now });
+    store.update(id, 'needs_review');
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: {
+        kind: 'transfer_out',
+        accountId: 'checking',
+        amountCents: 20000,
+        payee: 'Water Provider',
+        occurredAt: now,
+        ...fields,
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(imports).not.toHaveBeenCalled();
+    expect(store.get(id)?.status).toBe('needs_review');
+    await app.close();
+  });
+  it('leaves an uncategorized external transfer and its fee uncategorized', async () => {
+    const { app, headers, store, processor, imports } = await server();
+    const { id } = store.enqueue({ sender: 'SAB', message: 'Unknown transfer', receivedAt: now });
+    store.update(id, 'needs_review');
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: {
+        kind: 'transfer_out',
+        accountId: 'checking',
+        amountCents: 20000,
+        feeCents: 29,
+        payee: 'Bank transfer',
+        occurredAt: now,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    await processor.tick();
+    expect(imports).toHaveBeenCalledTimes(2);
+    for (const call of imports.mock.calls) expect(call[1][0]).not.toHaveProperty('category');
+    await app.close();
+  });
+  it('does not pair an explicitly external transfer with an unrelated own-account transfer', async () => {
+    const { app, headers, store, processor, imports } = await server();
+    const previous = store.enqueue({
+      sender: 'SAB',
+      message: 'Prior own-account transfer',
+      receivedAt: now,
+    });
+    store.update(previous.id, 'imported', {
+      parsed: {
+        bank: 'sab',
+        kind: 'transfer_in',
+        amountCents: 20000,
+        principalCents: 20000,
+        feeCents: 0,
+        payee: 'Bank transfer',
+        occurredAt: now,
+        note: 'Previous transfer',
+        explicitTransferAccountId: 'checking',
+      },
+    });
+    store.recordTransfer(previous.id, 'credit', undefined, 20000, now);
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: 'Unknown water transfer',
+      receivedAt: now,
+    });
+    store.update(id, 'needs_review');
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: {
+        kind: 'transfer_out',
+        accountId: 'checking',
+        amountCents: 20000,
+        feeCents: 29,
+        payee: 'Water Provider',
+        categoryId: 'food',
+        occurredAt: now,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('imported');
+    expect(imports).toHaveBeenCalledTimes(2);
+    expect(imports.mock.calls[0]![1][0]).toMatchObject({
+      amount: -20000,
+      category: 'food',
+      payee_name: 'Water Provider',
+    });
+    await app.close();
+  });
+  it('applies a transfer template category only to external counterparties and their fees', async () => {
+    const { app, headers, store, processor, imports } = await server();
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/console/templates',
+      headers,
+      payload: {
+        id: 'water-transfer',
+        name: 'Water transfer',
+        bank: 'sab',
+        kind: 'transfer_out',
+        categoryId: 'food',
+        pattern: 'Transfer {amount} from {suffix} to {to} fee {fee}',
+      },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    for (const to of ['9999', '5678']) {
+      const { id } = store.enqueue({
+        sender: 'SAB',
+        message: `Transfer 200 from 1234 to ${to} fee 0.29`,
+        receivedAt: now,
+      });
+      await processor.tick();
+      expect(store.get(id)?.status).toBe('imported');
+    }
+    expect(imports.mock.calls[0]![1][0]).toMatchObject({ amount: -20000, category: 'food' });
+    expect(imports.mock.calls[1]![1][0]).toMatchObject({ amount: -29, category: 'food' });
+    expect(imports.mock.calls[2]![1][0]).toMatchObject({ amount: -20000, payee: 'payee-credit' });
+    expect(imports.mock.calls[2]![1][0]).not.toHaveProperty('category');
+    expect(imports.mock.calls[3]![1][0]).toMatchObject({ amount: -29, category: 'fees' });
     await app.close();
   });
   it('retains unsupported nonempty Tasker messages in the log without importing them', async () => {

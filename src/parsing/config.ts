@@ -72,6 +72,15 @@ const schema = z
           )
           .min(1),
         fields,
+        review: z
+          .object({
+            kinds: z
+              .array(z.object({ value: kind, patterns: z.array(pattern).min(1) }).strict())
+              .default([]),
+            fields: fields.default({}),
+          })
+          .strict()
+          .optional(),
       })
       .strict(),
     templates: z
@@ -100,6 +109,10 @@ export interface ParserConfig {
     ignored: { value: z.infer<typeof reason>; patterns: RegExp[] }[];
     kinds: { value: z.infer<typeof kind>; patterns: RegExp[]; cardPaymentReceived?: boolean }[];
     fields: CompiledFields;
+    review?: {
+      kinds: { value: z.infer<typeof kind>; patterns: RegExp[] }[];
+      fields: CompiledFields;
+    };
   };
   templates: {
     id: string;
@@ -159,6 +172,13 @@ export function compileParserConfig(input: unknown): ParserConfig {
         patterns: r.patterns.map((p, i) => compile(p, `shared.kinds.${r.value}[${i}]`)),
       })),
       fields: compileFields(file.shared.fields, 'shared.fields'),
+      review: file.shared.review && {
+        kinds: file.shared.review.kinds.map((r) => ({
+          ...r,
+          patterns: r.patterns.map((p, i) => compile(p, `shared.review.kinds.${r.value}[${i}]`)),
+        })),
+        fields: compileFields(file.shared.review.fields, 'shared.review.fields'),
+      },
     },
     templates,
   };

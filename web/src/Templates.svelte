@@ -266,26 +266,17 @@
               >{/each}</select
           ></label
         ><label
-          >Action<select
-            bind:value={form.kind}
-            onchange={(event) => {
-              preview = null;
-              if (
-                ['transfer_in', 'transfer_out', 'card_payment'].includes(event.currentTarget.value)
-              )
-                form.categoryId = '';
-            }}
+          >Action<select bind:value={form.kind} onchange={() => (preview = null)}
             >{#each actions as [value, text] (value)}<option {value}>{text}</option>{/each}</select
           ></label
         ><label
-          >Category<select
-            bind:value={form.categoryId}
-            disabled={['transfer_in', 'transfer_out', 'card_payment'].includes(form.kind)}
-            onchange={() => (preview = null)}
+          >Category<select bind:value={form.categoryId} onchange={() => (preview = null)}
             ><option value="">Use merchant mapping / AI</option
             >{#each catalog.categories as c (c.id)}<option value={c.id}>{c.name}</option
               >{/each}</select
-          ></label
+          >{#if ['transfer_in', 'transfer_out', 'card_payment'].includes(form.kind)}<small
+              >Applies to external counterparties. Transfers between your accounts stay linked.</small
+            >{/if}</label
         >
       </div>
       {#if error}<div class="error" role="alert">{error}</div>{/if}{#if preview}<div

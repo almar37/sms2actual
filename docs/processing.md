@@ -20,6 +20,10 @@ The event list has cursor pagination and optional `status`, `enrichmentStatus`, 
 
 Processing retries wait 1 minute, 5 minutes, 30 minutes, and 2 hours. Events remain available to inspect after a terminal error.
 
+In **SMS inbox**, review suggestions prefill recognizable details. Choose **External / unknown account** for a transfer to someone outside your Actual accounts, then select its category. The principal and fee import as separate entries in that same category: a SAR 200 water payment with SAR 0.29 fees debits SAR 200.29 from the account and charges both entries to your chosen bill category. Without a selected category, named external counterparties can use merchant mapping or AI; if no category is resolved, both entries stay uncategorized. Transfers between your Actual accounts remain linked and have no expense category; their fees use the configured Bank Fees category. A transfer template's category applies only to external counterparties.
+
+The review form also prefills the notes the system would import. You can edit or clear them before approving. Your text, including line breaks, is saved with the review and used on both the principal and fee, including after a processing retry. Edit already imported transactions in Actual.
+
 When a new parser revision starts, it gives retained `ignored` and `needs_review` events from earlier revisions one more attempt. This allows a parser fix to recover a missed transaction. Already imported events are never replayed, and Actual's stable import IDs prevent duplicates.
 
 ## How inbox sync works

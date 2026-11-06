@@ -63,7 +63,8 @@ export interface ParsedTransaction {
   cardPaymentReceived?: boolean;
   /** Snapshot of the configured funding default used for this payment. */
   assumedFundingAccountId?: string;
-  explicitTransferAccountId?: string;
+  /** An account ID creates a linked transfer; null explicitly selects an external counterparty. */
+  explicitTransferAccountId?: string | null;
 }
 
 export interface AccountConfig {

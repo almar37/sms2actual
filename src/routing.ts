@@ -70,6 +70,7 @@ export function resolveTransferTarget(
   accounts: ResolvedAccount[],
   tx: ParsedTransaction,
 ): Pick<ResolvedAccount, 'id' | 'key'> | undefined {
+  if (tx.explicitTransferAccountId === null) return undefined;
   if (tx.explicitTransferAccountId)
     return (
       accounts.find((a) => a.id === tx.explicitTransferAccountId) ?? {

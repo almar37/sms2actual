@@ -21,6 +21,7 @@
     form = $state<any>({});
   let searchTimer: ReturnType<typeof setTimeout>;
   const transfer = $derived(['transfer_in', 'transfer_out', 'card_payment'].includes(form.kind));
+  const linkedTransfer = $derived(transfer && Boolean(form.targetAccountId));
   const imported = $derived(
     selected &&
       (selected.status === 'imported' ||
@@ -68,25 +69,20 @@
   async function open(id: string) {
     try {
       selected = await api('/api/console/events/' + encodeURIComponent(id));
-      const tx = selected.parsed;
+      const tx = selected.parsed ?? selected.reviewDraft;
       form = {
-        kind: tx?.kind ?? 'purchase',
-        accountId:
-          catalog.settings.accounts.find(
-            (a: any) =>
-              a.match.bank === tx?.bank &&
-              (!tx?.accountAlias ||
-                a.match.accountSuffixes?.includes(tx.accountAlias) ||
-                a.cards.some((c: any) => c.suffix === tx.accountAlias)),
-          )?.id ??
-          catalog.settings.accounts[0]?.id ??
-          '',
-        amount: Math.abs(tx?.principalCents ?? tx?.amountCents ?? 0) / 100,
+        kind: tx?.kind ?? '',
+        accountId: selected.sourceAccountId ?? '',
+        amount:
+          tx?.principalCents != null || tx?.amountCents != null
+            ? Math.abs(tx.principalCents ?? tx.amountCents) / 100
+            : '',
         fee: (tx?.feeCents ?? 0) / 100,
         payee: tx?.payee ?? '',
-        categoryId: selected.suggestion?.categoryId ?? '',
+        categoryId: selected.categoryId ?? '',
         targetAccountId: selected.targetAccountId ?? '',
         date: localDateInput(tx?.occurredAt ?? selected.input.receivedAt),
+        notes: selected.notes,
       };
     } catch (e) {
       notify((e as Error).message);
@@ -102,9 +98,10 @@
         amountCents: Math.round(Number(form.amount) * 100),
         feeCents: transfer ? Math.round(Number(form.fee) * 100) : 0,
         payee: form.payee,
-        categoryId: !transfer && form.categoryId ? form.categoryId : undefined,
+        categoryId: !linkedTransfer && form.categoryId ? form.categoryId : undefined,
         targetAccountId: transfer && form.targetAccountId ? form.targetAccountId : undefined,
         occurredAt: localDateIso(form.date),
+        notes: form.notes,
       });
       selected = null;
       notify('Review saved. Message queued for import.');
@@ -124,7 +121,7 @@
         kind: form.kind,
         bank: catalog.settings.accounts.find((a: any) => a.id === form.accountId)?.match.bank ?? '',
         receivedAt: selected.input.receivedAt,
-        categoryId: form.categoryId,
+        categoryId: linkedTransfer ? '' : form.categoryId,
       }),
     );
     navigate('templates');
@@ -292,11 +289,16 @@
           This message has already reached Actual. Edit its transaction there. Save a template below
           to teach future messages.
         </div>{/if}
+      {#if selected.status === 'needs_review'}<div class="info-box">
+          {#if selected.sourceBank}Source bank: {selected.sourceBank}.
+          {/if}Check the suggested details and fill any missing fields before approving.
+        </div>{/if}
       <form onsubmit={submit}>
         <div class="form-grid">
           <label
             >Action<select
               bind:value={form.kind}
+              required
               onchange={(event) => {
                 if (
                   !['transfer_in', 'transfer_out', 'card_payment'].includes(
@@ -305,6 +307,7 @@
                 )
                   form.fee = 0;
               }}
+              ><option value="" disabled>Select action</option
               >{#each actions as [value, text] (value)}<option {value}>{text}</option
                 >{/each}</select
             ></label
@@ -330,7 +333,11 @@
               step="0.01"
               bind:value={form.fee}
               disabled={!transfer}
-            /></label
+            />{#if transfer}<small
+                >{linkedTransfer
+                  ? 'Fees use your Bank Fees category.'
+                  : 'Fees use the same category as this transaction.'}</small
+              >{/if}</label
           ><label class="full"
             >Payee / merchant<input bind:value={form.payee} maxlength="100" required /></label
           >{#if transfer}<label class="full"
@@ -340,7 +347,7 @@
                     value={account.id}>{account.name}</option
                   >{/each}</select
               ><small>An Actual account creates a linked transfer.</small></label
-            >{:else}<label class="full"
+            >{/if}{#if !linkedTransfer}<label class="full"
               >Category<select bind:value={form.categoryId}
                 ><option value="">Use merchant mapping / AI</option
                 >{#each catalog.categories as category (category.id)}<option value={category.id}
@@ -353,6 +360,9 @@
               bind:value={form.date}
               required
             /><small>Uses your device’s time zone.</small></label
+          >
+          <label class="full"
+            >Notes<textarea bind:value={form.notes} maxlength="4000" rows="3"></textarea></label
           >
         </div>
         <div class="form-actions">

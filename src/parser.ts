@@ -177,3 +177,68 @@ export function parseSms(
     },
   };
 }
+
+/** Partial suggestions for the review form only. Never used to authorize an import. */
+export function extractReviewDraft(
+  raw: string,
+  receivedAt: string,
+  banks: readonly BankConfig[],
+  sender: string,
+  config: ParserConfig,
+): Partial<ParsedTransaction> {
+  const text = normalizeText(raw);
+  if (classify(text, config.shared.ignored)) return {};
+  const source = resolveSmsSource(
+    sender,
+    text,
+    banks.map((bank) => ({ ...bank, disposition: 'import' })),
+  );
+  const bank = source.type === 'supported' ? source.bank : undefined;
+  const templates = config.templates.filter(
+    (t) =>
+      bank && banks.find((b) => b.id === bank)?.templates?.includes(t.id) && matches(text, t.match),
+  );
+  // Conflicting templates cannot safely supply template-specific hints.
+  const template = templates.length === 1 ? templates[0] : undefined;
+  const e = createExtractors({ ...config.shared.fields, ...template?.fields });
+  const fallback = createExtractors({ ...config.shared.fields, ...config.shared.review?.fields });
+  const kind =
+    template?.kind ??
+    classify(text, config.shared.kinds) ??
+    classify(text, config.shared.review?.kinds ?? []);
+  const references = accountReferences(text, kind ?? 'purchase', e);
+  const reviewReferences = accountReferences(text, kind ?? 'purchase', fallback);
+  const positive = ['refund', 'deposit', 'transfer_in'].includes(kind ?? '');
+  const fee = e.extractAmount(text, 'fee');
+  const total = e.extractAmount(text, 'total');
+  const principal =
+    e.extractAmount(text, 'principal') ??
+    e.extractSarEquivalent(text) ??
+    fallback.extractAmount(text, 'principal') ??
+    (total !== undefined ? total - (fee ?? 0) : undefined);
+  const safeMoney = (value: number | undefined) =>
+    value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const amount = safeMoney(principal);
+  const sign = positive ? 1 : -1;
+  const transfer = ['transfer_in', 'transfer_out', 'card_payment'].includes(kind ?? '');
+  const payee = transfer
+    ? (extractDisplayName(
+        references.beneficiaryValue ?? (positive ? references.fromValue : references.toValue),
+      ) ??
+      extractDisplayName(
+        reviewReferences.beneficiaryValue ??
+          (positive ? reviewReferences.fromValue : reviewReferences.toValue),
+      ))
+    : (e.extractBiller(text).name ?? e.extractMerchant(text));
+  return {
+    bank,
+    kind,
+    accountAlias: references.accountAlias ?? reviewReferences.accountAlias,
+    principalCents: amount === undefined ? undefined : sign * amount,
+    feeCents: safeMoney(fee),
+    payee,
+    occurredAt: e.value(text, 'date')
+      ? e.extractDate(text, receivedAt)
+      : fallback.extractDate(text, receivedAt),
+  };
+}

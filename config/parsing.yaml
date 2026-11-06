@@ -58,6 +58,35 @@ shared:
         - source: (?:purchase|\bpos\b|online|e-?commerce|شراء|مشتريات|مدفوعات وزارة
             الداخلية|سداد\s+فاتورة)
           flags: iu
+  # Suggestions for manual review only; these never authorize automatic imports.
+  review:
+    kinds:
+      - value: transfer_out
+        patterns:
+          - source: (?:حوالة|تحويل)\s+(?:محلية|دولية)\s+صادر[ةه]?
+            flags: iu
+      - value: transfer_in
+        patterns:
+          - source: (?:حوالة|تحويل)\s+(?:محلية|دولية)\s+وارد[ةه]?
+            flags: iu
+    fields:
+      date:
+        - source: (?<value>\d{2}/\d{1,2}/\d{1,2}(?:\s+\d{1,2}:\d{2})?)
+          flags: u
+      beneficiary:
+        - source: (?:^|\s)لـ?\s*\d{3,6}[;؛]\s*(?<value>[^;؛]+?)(?=\s+(?:رسوم|\d{1,2}[:/])|$)
+          flags: iu
+      principal:
+        - source: (?:حوالة|تحويل)\s+(?:محلية\s+|دولية\s+)?(?:صادر[ةه]?|وارد[ةه]?)\s*[:：]?(?:\s*(?:بمبلغ|مبلغ|بـ?))?\s*[:：]?\s*(?<value>[\d.]+)\s*(?:SAR|SR)\b
+          flags: iu
+        - source: (?:حوالة|تحويل)\s+(?:محلية\s+|دولية\s+)?(?:صادر[ةه]?|وارد[ةه]?)\s*[:：]?(?:\s*(?:بمبلغ|مبلغ|بـ?))?\s*[:：]?\s*(?:SAR|SR)\s*(?<value>[\d.]+)
+          flags: iu
+      from:
+        - source: (?:^|\s)من\s*[:：]?\s*(?<value>\d{3,6})(?!\d)
+          flags: iu
+      to:
+        - source: (?:^|\s)(?:لـ?|إلى|الى)\s*[:：]?\s*(?<value>[^;؛\n]+?)(?=\s+(?:رسوم|SAR|SR)|[;؛]|$)
+          flags: iu
   fields:
     accountAlias:
       - source: بطاقة\s+(?:الأول\s+)?مدى-?أثير\s*\((?<value>[\d٠-٩]{3,6})\)
