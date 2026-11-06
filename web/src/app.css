@@ -740,6 +740,8 @@ nav a.active {
   font-size: 10px;
 }
 .table-scroll {
+  /* Keep positioned table content, including hidden labels, inside this scroll area. */
+  position: relative;
   overflow-x: auto;
 }
 table {
@@ -1929,6 +1931,11 @@ pre {
     gap: 14px;
     margin-bottom: 23px;
     align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .page-heading > div {
+    flex: 1 1 220px;
+    min-width: 0;
   }
   .page-heading > button {
     font-size: 10px;

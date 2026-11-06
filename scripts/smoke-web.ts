@@ -406,6 +406,90 @@ try {
     fullPage: true,
     animations: 'disabled',
   });
+  // A real mobile context catches overflow that makes Chrome zoom the whole page out.
+  // Resizing a desktop page and comparing scrollWidth to innerWidth misses that zoom.
+  const mobileContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    storageState: await page.context().storageState(),
+  });
+  try {
+    const phone = await mobileContext.newPage();
+    phone.on('pageerror', (error) => errors.push(error.message));
+    const assertPhoneWidth = async (name: string) => {
+      const width = phone.viewportSize()!.width;
+      const metrics = await phone.evaluate(() => ({
+        innerWidth: window.innerWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+        visualWidth: window.visualViewport?.width,
+        scale: window.visualViewport?.scale,
+      }));
+      if (width === 390) {
+        await phone.screenshot({
+          path: `${artifactDir}/phone-${name}.png`,
+          animations: 'disabled',
+        });
+      }
+      expect(metrics.innerWidth, `${name}: ${JSON.stringify(metrics)}`).toBe(width);
+      expect(metrics.scrollWidth, `${name}: ${JSON.stringify(metrics)}`).toBeLessThanOrEqual(width);
+      expect(metrics.clientWidth).toBe(width);
+      expect(metrics.visualWidth).toBeCloseTo(width, 0);
+      expect(metrics.scale).toBe(1);
+      for (const dialog of await phone.getByRole('dialog').all()) {
+        const bounds = await dialog.boundingBox();
+        expect(bounds!.x).toBeGreaterThanOrEqual(0);
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+        expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+      }
+    };
+    const routes = [
+      ['overview', 'Everything, in sync.'],
+      ['accounts', 'Accounts & cards.'],
+      ['merchants', 'Your merchants.'],
+      ['templates', 'Message templates.'],
+      ['ai', 'AI categorization.'],
+      ['tasker', 'Tasker connection.'],
+      ['settings', 'Workspace settings.'],
+      ['sms', 'SMS inbox.'],
+    ];
+    for (const width of [390, 320, 430]) {
+      await phone.setViewportSize({ width, height: 844 });
+      for (const [route, heading] of routes) {
+        await phone.goto(origin + '/#' + route);
+        await expect(phone.getByRole('heading', { level: 1 })).toHaveText(heading!);
+        await phone.waitForLoadState('networkidle');
+        await assertPhoneWidth(route!);
+        if (route === 'merchants') {
+          await phone.getByRole('button', { name: 'Add merchant', exact: true }).click();
+          await assertPhoneWidth('merchant-editor');
+          await phone.keyboard.press('Escape');
+        }
+      }
+      // The wide inbox table must scroll inside its panel, independently of the page.
+      const tableScroll = phone.locator('.table-scroll');
+      expect(await tableScroll.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
+      await tableScroll.evaluate((node) => {
+        node.scrollLeft = node.scrollWidth;
+      });
+      expect(await tableScroll.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
+      await assertPhoneWidth('sms-scrolled');
+      await tableScroll.evaluate((node) => {
+        node.scrollLeft = 0;
+      });
+      await phone.getByRole('button', { name: 'Menu', exact: true }).click();
+      await assertPhoneWidth('menu');
+      await phone.keyboard.press('Escape');
+      await phone.getByRole('button', { name: reviewTransferMessage, exact: true }).click();
+      await assertPhoneWidth('review');
+      await phone.getByRole('textbox', { name: 'Notes', exact: true }).scrollIntoViewIfNeeded();
+      await assertPhoneWidth('review-notes');
+      await phone.keyboard.press('Escape');
+    }
+  } finally {
+    await mobileContext.close();
+  }
   const messagesBeforeReset = store.list({ limit: 50 }).length;
   await page.getByRole('button', { name: 'Hard reset SMS & logs', exact: true }).click();
   const resetDialog = page.getByRole('dialog', { name: 'Reset SMS and logs', exact: true });
