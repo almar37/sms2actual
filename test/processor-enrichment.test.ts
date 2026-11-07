@@ -1,5 +1,5 @@
 import { banks, parsing } from './fixtures/banks.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
 import type { ActualAdapter, AiSuggestion, Enricher, ResolvedConfig } from '../src/types.js';
@@ -30,7 +30,7 @@ function setup(suggestion: AiSuggestion | null, shouldThrow = false) {
     },
   };
   const enricher: Enricher = {
-    enrich: async () => {
+    enrich: vi.fn<Enricher['enrich']>(async () => {
       if (shouldThrow) throw new Error('quota exhausted');
       return suggestion
         ? {
@@ -42,7 +42,7 @@ function setup(suggestion: AiSuggestion | null, shouldThrow = false) {
             response: {},
           }
         : { status: 'disabled', durationMs: 0 };
-    },
+    }),
   };
   const config: ResolvedConfig = {
     banks,
@@ -64,10 +64,37 @@ function setup(suggestion: AiSuggestion | null, shouldThrow = false) {
     message: 'SAB purchase Card **5202 Amount SAR 25.00 at Example Store on 2026-08-22 10:05',
     receivedAt: '2026-08-22T10:10:30+03:00',
   });
-  return { store, imported, processor: new Processor(store, actual, enricher, config), id };
+  return {
+    store,
+    imported,
+    actual,
+    enricher,
+    config,
+    processor: new Processor(store, actual, enricher, config),
+    id,
+  };
 }
 
 describe('processor enrichment', () => {
+  it('pauses queue imports during an Actual edit and releases the gate after a failed edit', async () => {
+    const { processor, imported } = setup(null);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const editing = processor.withActualAccess(async () => {
+      await gate;
+      throw new Error('Edit failed');
+    });
+    const failed = expect(editing).rejects.toThrow('Edit failed');
+    await processor.tick();
+    expect(imported).toHaveLength(0);
+    await expect(processor.withActualAccess(async () => {})).rejects.toThrow('busy');
+    release();
+    await failed;
+    await processor.tick();
+    expect(imported).toHaveLength(1);
+  });
   it('records parser review reasons without retrying or importing', async () => {
     const { store, imported, processor, id } = setup(null);
     store.db.prepare('UPDATE events SET payload=? WHERE id=?').run(
@@ -105,8 +132,9 @@ describe('processor enrichment', () => {
       const { store, imported, processor, id } = setup(suggestion);
       await processor.tick();
 
-      expect(imported[0]).toMatchObject({ payee_name: 'Sample Books', category });
+      expect(imported[0]).toMatchObject({ payee_name: 'Example Store', category });
       expect(JSON.parse(store.get(id)!.suggestion!)).toEqual(suggestion);
+      expect(JSON.parse(store.get(id)!.parsed!).importCategoryId).toBe(category ?? null);
     },
   );
 
@@ -134,5 +162,56 @@ describe('processor enrichment', () => {
 
     expect(imported[0]).toMatchObject({ payee_name: 'Sample Books', category: 'shopping' });
     expect(store.enrichmentAttempts(id).at(-1)?.status).toBe('history_hit');
+  });
+
+  it('keeps a guessed identity out of imports and future history hits', async () => {
+    const { store, imported, actual, enricher, processor, id } = setup({
+      payee: 'Wrong merchant',
+      categoryId: 'shopping',
+      confidence: 0.99,
+      reason: 'guess',
+    });
+    await processor.tick();
+    expect(imported[0]).toMatchObject({ payee_name: 'Example Store', category: 'shopping' });
+    expect(store.mapping('account-id', 'example store')?.source).toBe('ai');
+    expect(JSON.parse(store.enrichmentAttempts(id).at(-1)!.details)).toMatchObject({
+      payeeApplied: false,
+      payeeReason: 'unconfirmed_merchant_alias',
+    });
+    actual.categories = async () => [{ id: 'shopping', name: 'Shopping' }];
+    actual.transactions = async () => [
+      {
+        id: 'actual-id',
+        accountId: 'account-id',
+        date: imported[0]!.date,
+        importedId: imported[0]!.imported_id,
+        importedPayee: 'Example Store',
+        payeeName: 'Example Store',
+        categoryId: 'shopping',
+      },
+    ];
+    await processor.refreshMappings();
+    store.enqueue({
+      eventId: 'next',
+      sender: 'SAB',
+      message: 'SAB purchase Card **5202 Amount SAR 30 at Example Store on 2026-08-23 10:05',
+      receivedAt: '2026-08-23T10:10:30+03:00',
+    });
+    await processor.tick();
+    expect(enricher.enrich).toHaveBeenCalledTimes(2);
+    expect(
+      store.enrichmentAttempts('next').some((attempt) => attempt.status === 'history_hit'),
+    ).toBe(false);
+  });
+
+  it.each([0.69, 0.7])('changes formatting only above the threshold (%s)', async (confidence) => {
+    const { imported, processor } = setup({
+      payee: 'EXAMPLE STORE',
+      categoryId: 'shopping',
+      confidence,
+      reason: 'formatting',
+    });
+    await processor.tick();
+    expect(imported[0]?.payee_name).toBe(confidence >= 0.7 ? 'EXAMPLE STORE' : 'Example Store');
   });
 });

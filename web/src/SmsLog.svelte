@@ -84,6 +84,21 @@
         date: localDateInput(tx?.occurredAt ?? selected.input.receivedAt),
         notes: selected.notes,
       };
+      if (selected.actualSync?.form) {
+        const current = selected.actualSync.form;
+        form = {
+          ...form,
+          kind: current.kind,
+          accountId: current.accountId,
+          amount: current.amountCents / 100,
+          fee: current.feeCents / 100,
+          payee: current.payee,
+          categoryId: current.categoryId ?? '',
+          targetAccountId: current.targetAccountId ?? '',
+          date: localDateInput(current.occurredAt),
+          notes: current.notes,
+        };
+      }
     } catch (e) {
       notify((e as Error).message);
     }
@@ -92,19 +107,27 @@
     event.preventDefault();
     busy = true;
     try {
-      await api('/api/console/events/' + encodeURIComponent(selected.id) + '/action', {
-        kind: form.kind,
-        accountId: form.accountId,
-        amountCents: Math.round(Number(form.amount) * 100),
-        feeCents: transfer ? Math.round(Number(form.fee) * 100) : 0,
-        payee: form.payee,
-        categoryId: !linkedTransfer && form.categoryId ? form.categoryId : undefined,
-        targetAccountId: transfer && form.targetAccountId ? form.targetAccountId : undefined,
-        occurredAt: localDateIso(form.date),
-        notes: form.notes,
-      });
+      const saved = await api(
+        '/api/console/events/' + encodeURIComponent(selected.id) + '/action',
+        {
+          kind: form.kind,
+          accountId: form.accountId,
+          amountCents: Math.round(Number(form.amount) * 100),
+          feeCents: transfer ? Math.round(Number(form.fee) * 100) : 0,
+          payee: form.payee,
+          categoryId: !linkedTransfer && form.categoryId ? form.categoryId : undefined,
+          targetAccountId: transfer && form.targetAccountId ? form.targetAccountId : undefined,
+          occurredAt: localDateIso(form.date),
+          notes: form.notes,
+          actualRevision: selected.actualSync?.revision,
+        },
+      );
       selected = null;
-      notify('Review saved. Message queued for import.');
+      notify(
+        saved.updated
+          ? 'Transaction updated in Actual.'
+          : 'Review saved. Message queued for import.',
+      );
       await load();
     } catch (e) {
       notify((e as Error).message);
@@ -199,9 +222,15 @@
               ><button class="message-preview" onclick={() => void open(event.id)}
                 >{event.input?.message ?? 'Message unavailable'}</button
               >{#if event.error}<small class="error-text">{event.error}</small>{/if}</td
-            ><td><span class={'status status-' + event.status}>{label(event.status)}</span></td><td
-              class="number"
-              class:positive={(event.parsed?.amountCents ?? 0) > 0}
+            ><td
+              ><span
+                class={'status status-' +
+                  (event.categoryNeedsAttention ? 'imported_review' : event.status)}
+                >{event.categoryNeedsAttention
+                  ? 'Imported · category needs review'
+                  : label(event.status)}</span
+              ></td
+            ><td class="number" class:positive={(event.parsed?.amountCents ?? 0) > 0}
               >{money(event.parsed?.amountCents)}</td
             ><td
               ><button
@@ -277,8 +306,13 @@
         <p dir="auto">{selected.input?.message}</p>
       </div>
       <div class="detail-meta">
-        <span class={'status status-' + selected.status}>{label(selected.status)}</span><span
-          class="muted"
+        <span
+          class={'status status-' +
+            (selected.categoryNeedsAttention ? 'imported_review' : selected.status)}
+          >{selected.categoryNeedsAttention
+            ? 'Imported · category needs review'
+            : label(selected.status)}</span
+        ><span class="muted"
           >{selected.parser_reason
             ? label(selected.parser_reason)
             : 'Parser result available below'}</span
@@ -286,8 +320,22 @@
       </div>
       {#if selected.error}<div class="error">{selected.error}</div>{/if}
       {#if imported}<div class="info-box">
-          This message has already reached Actual. Edit its transaction there. Save a template below
-          to teach future messages.
+          Changes saved here update the linked transaction in Actual.
+          {#if selected.actualSync?.error}<p class="error-text">{selected.actualSync.error}</p>{/if}
+        </div>{/if}
+      {#if selected.categoryNeedsAttention}<div class="info-box">
+          No category was sent on the original import. Select the correct category below and save to
+          Actual.
+          {#if selected.categorySuggestion && !selected.categorySuggestion.applied}
+            AI suggested {catalog.categories.find(
+              (category: any) => category.id === selected.categorySuggestion.categoryId,
+            )?.name ?? 'a category'}
+            at {Math.round(selected.categorySuggestion.confidence * 100)}% confidence{#if selected.categorySuggestion.threshold != null},
+              below the {Math.round(selected.categorySuggestion.threshold * 100)}% threshold{/if}.
+            {selected.categorySuggestion.reason}
+          {:else if selected.enrichment_status?.startsWith('llm_')}
+            Categorization: {label(selected.enrichment_status.replace('llm_', ''))}.
+          {/if}
         </div>{/if}
       {#if selected.status === 'needs_review'}<div class="info-box">
           {#if selected.sourceBank}Source bank: {selected.sourceBank}.
@@ -348,7 +396,7 @@
                   >{/each}</select
               ><small>An Actual account creates a linked transfer.</small></label
             >{/if}{#if !linkedTransfer}<label class="full"
-              >Category<select bind:value={form.categoryId}
+              >Category{imported ? ' in Actual' : ''}<select bind:value={form.categoryId}
                 ><option value="">Use merchant mapping / AI</option
                 >{#each catalog.categories as category (category.id)}<option value={category.id}
                     >{category.name}</option
@@ -368,8 +416,13 @@
         <div class="form-actions">
           <button type="button" onclick={makeTemplate}
             ><Icon name="templates" size={16} />Save as template</button
-          ><button class="primary" disabled={busy || Boolean(imported)}
-            >{busy ? 'Saving…' : 'Approve & import'}<Icon name="check" size={16} /></button
+          ><button
+            class="primary"
+            disabled={busy || Boolean(imported && !selected.actualSync?.revision)}
+            >{busy ? 'Saving…' : imported ? 'Save to Actual' : 'Approve & import'}<Icon
+              name="check"
+              size={16}
+            /></button
           >
         </div>
       </form>

@@ -29,7 +29,7 @@ describe('configurable message templates', () => {
   it('uses shared rules when no template matches and isolates other banks', () => {
     const text = 'Purchase Card **1234 Amount: SAR 20 at Example';
     expect(parse(text)).toEqual(parseSms(text, '2026-08-22T10:00:00Z', banks, 'SAB', parsing));
-    expect(parse('Special purchase Amount: SAR 20', undefined, 'D360')).toMatchObject({
+    expect(parse('Special purchase Amount: SAR 20 at Example', undefined, 'D360')).toMatchObject({
       type: 'transaction',
       transaction: { amountCents: -2000 },
     });

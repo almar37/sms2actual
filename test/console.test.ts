@@ -118,6 +118,7 @@ async function server(signedIn = true, trustedOrigins: string[] = [], onboarding
       tick: async () => {},
       setMinConfidence: () => {},
       isBusy: () => f.processor.isBusy(),
+      withActualAccess: <T>(work: () => Promise<T>) => f.processor.withActualAccess(work),
     } as unknown as Processor,
     ready: () => true,
     console: {
@@ -883,6 +884,150 @@ describe('console access and APIs', () => {
     expect(transactions).not.toHaveBeenCalled();
     await app.close();
   });
+  it.each([true, false])(
+    'distinguishes a rejected suggestion from an applied category (snapshot %s)',
+    async (snapshot) => {
+      const { app, headers, store } = await server();
+      const { id } = store.enqueue({
+        sender: 'AlRajhiBank',
+        message: 'AIR ARABI',
+        receivedAt: now,
+      });
+      store.update(id, 'imported', {
+        parsed: {
+          bank: 'alrajhi',
+          kind: 'purchase',
+          amountCents: -94570,
+          feeCents: 0,
+          payee: 'AIR ARABI',
+          occurredAt: now,
+          note: 'Parsed alrajhi purchase',
+          ...(snapshot ? { importCategoryId: null } : {}),
+        },
+        suggestion: {
+          payee: 'Air Arabia',
+          categoryId: 'food',
+          confidence: 0.55,
+          reason: 'No travel category available',
+        },
+      });
+      store.recordEnrichment(id, 'llm_low_confidence', { threshold: 0.7, categoryApplied: false });
+      const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+      expect(detail.json()).toMatchObject({
+        categoryId: null,
+        categoryNeedsAttention: true,
+        categorySuggestion: {
+          categoryId: 'food',
+          confidence: 0.55,
+          applied: false,
+          threshold: 0.7,
+        },
+      });
+      const list = await app.inject({ url: '/api/console/events', headers });
+      expect(list.json().events.find((event: any) => event.id === id).categoryNeedsAttention).toBe(
+        true,
+      );
+      await app.close();
+    },
+  );
+  it.each(['history_hit', 'llm_success'])(
+    'shows the category applied by a legacy %s decision',
+    async (status) => {
+      const { app, headers, store } = await server();
+      const { id } = store.enqueue({ sender: 'SAB', message: 'Purchase', receivedAt: now });
+      store.update(id, 'imported', {
+        parsed: {
+          bank: 'sab',
+          kind: 'purchase',
+          amountCents: -100,
+          feeCents: 0,
+          payee: 'Shop',
+          occurredAt: now,
+          note: 'Parsed sab purchase',
+        },
+        suggestion: { payee: 'Shop', categoryId: 'food', confidence: 0.9, reason: 'Known shop' },
+      });
+      store.recordEnrichment(id, status, {
+        categoryId: 'food',
+        threshold: 0.7,
+        categoryApplied: true,
+      });
+      const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+      expect(detail.json()).toMatchObject({ categoryId: 'food', categoryNeedsAttention: false });
+      await app.close();
+    },
+  );
+  it('updates a linked imported transaction through the review API and rejects stale revisions', async () => {
+    const { app, headers, store, actual, imports } = await server();
+    const row = {
+      id: 'linked-actual-id',
+      accountId: 'checking',
+      date: '2026-11-05',
+      amount: -94570,
+      payeeName: 'Air Arabia',
+      notes: 'Changed in Actual',
+      categoryId: undefined as string | undefined,
+    };
+    vi.spyOn(actual, 'transactions').mockImplementation(async (accountId) =>
+      accountId === row.accountId ? [row] : [],
+    );
+    actual.updateTransactions = vi.fn(async (updates) => {
+      const update = updates[0]!;
+      Object.assign(row, {
+        categoryId: update.categoryId ?? undefined,
+        notes: update.notes,
+        amount: update.amount,
+      });
+    });
+    const { id } = store.enqueue({ sender: 'SAB', message: 'Original bank text', receivedAt: now });
+    store.update(id, 'imported', {
+      actualTransactionId: row.id,
+      parsed: {
+        bank: 'sab',
+        kind: 'purchase',
+        accountAlias: '1234',
+        amountCents: -94570,
+        feeCents: 0,
+        payee: 'AIR ARABI',
+        occurredAt: now,
+        note: 'Parsed sab purchase',
+      },
+    });
+    const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+    expect(detail.json().actualSync.form).toMatchObject({
+      payee: 'Air Arabia',
+      notes: 'Changed in Actual',
+    });
+    const edit = {
+      ...detail.json().actualSync.form,
+      categoryId: 'food',
+      notes: 'Flight booking',
+      actualRevision: detail.json().actualSync.revision,
+    };
+    const saved = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: edit,
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect(saved.json()).toMatchObject({ updated: true });
+    expect(row).toMatchObject({
+      id: 'linked-actual-id',
+      categoryId: 'food',
+      notes: 'Flight booking',
+    });
+    expect(imports).not.toHaveBeenCalled();
+    const stale = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/action`,
+      headers,
+      payload: edit,
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(actual.updateTransactions).toHaveBeenCalledTimes(1);
+    await app.close();
+  });
   it('uses a reviewed deposit category during processing and blocks reimport of imported messages', async () => {
     const { app, headers, store, processor, imports } = await server();
     const { id } = store.enqueue({ sender: 'SAB', message: 'Unknown bank text', receivedAt: now });
@@ -929,6 +1074,33 @@ describe('console access and APIs', () => {
   });
   it('stores explicit merchant edits and returns encrypted keys only as presence flags', async () => {
     const { app, headers, settings, store } = await server();
+    store.putLocalMapping({
+      account_id: 'checking',
+      merchant_key: 'coffee shop',
+      payee: 'AI guess',
+      category_id: 'food',
+      source_ref: 'ai-event',
+      source: 'ai',
+      decision_at: now,
+    });
+    const suggestions = await app.inject({ url: '/api/console/merchants', headers });
+    expect(suggestions.json().merchants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'ai',
+          reviewReason: 'AI suggestion — confirm before reuse',
+        }),
+      ]),
+    );
+    for (const merchant of ['Unknown merchant', 'Amazon sa 5/11/26 21:34']) {
+      const invalid = await app.inject({
+        method: 'PUT',
+        url: '/api/console/merchants',
+        headers,
+        payload: { accountId: 'checking', merchant, payee: 'Wrong', categoryId: 'food' },
+      });
+      expect(invalid.statusCode).toBe(400);
+    }
     const edit = await app.inject({
       method: 'PUT',
       url: '/api/console/merchants',
@@ -946,6 +1118,14 @@ describe('console access and APIs', () => {
       category_id: 'food',
       source: 'local',
     });
+    const confirmed = await app.inject({ url: '/api/console/merchants', headers });
+    expect(
+      confirmed
+        .json()
+        .merchants.find(
+          (mapping: { merchant_key: string }) => mapping.merchant_key === 'coffee shop',
+        ).reviewReason,
+    ).toBeUndefined();
     const save = await app.inject({
       method: 'PUT',
       url: '/api/console/ai',

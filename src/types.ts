@@ -65,6 +65,9 @@ export interface ParsedTransaction {
   assumedFundingAccountId?: string;
   /** An account ID creates a linked transfer; null explicitly selects an external counterparty. */
   explicitTransferAccountId?: string | null;
+  /** Category sent on import; null means explicitly uncategorized, absent means not recorded. */
+  importCategoryId?: string | null;
+  importedFeeId?: string;
 }
 
 export interface AccountConfig {
@@ -128,7 +131,20 @@ export interface HistoricalTransaction {
   categoryId?: string;
   importedId?: string;
   transferId?: string;
+  transferAccountId?: string;
+  notes?: string;
+  isSplit?: boolean;
   amount?: number;
+}
+export interface ActualTransactionUpdate {
+  id: string;
+  accountId: string;
+  date: string;
+  amount: number;
+  payeeName: string;
+  transferAccountId?: string;
+  categoryId: string | null;
+  notes: string;
 }
 export interface ImportResult {
   added: string[];
@@ -149,6 +165,7 @@ export interface ActualAdapter {
     endDate: string,
     limit?: number,
   ): Promise<HistoricalTransaction[]>;
+  updateTransactions?(updates: ActualTransactionUpdate[]): Promise<void>;
   transferPayee(accountId: string): Promise<string>;
   importTransactions(accountId: string, transactions: ActualTransaction[]): Promise<ImportResult>;
 }

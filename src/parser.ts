@@ -4,14 +4,16 @@ import {
   createExtractors,
   extractDisplayName,
   extractNumericReference,
+  normalizeMessage,
   normalizeText,
 } from './parsing/extractors.js';
+import { merchantReviewReason } from './merchant-identity.js';
 import { resolveSmsSource } from './sms-source.js';
 
 export { normalizeText } from './parsing/extractors.js';
 
 /** Increment when a parser release should re-evaluate retained parser outcomes. */
-export const PARSER_REVISION = 15;
+export const PARSER_REVISION = 16;
 
 export type ParserReason =
   | 'otp_or_login'
@@ -82,7 +84,8 @@ export function parseSms(
   sender = '',
   config: ParserConfig,
 ): ParseResult {
-  const text = normalizeText(raw);
+  const message = normalizeMessage(raw);
+  const text = normalizeText(message);
   const ignoredReason = classify(text, config.shared.ignored);
   if (ignoredReason) return { type: 'ignored', reason: ignoredReason };
 
@@ -106,7 +109,7 @@ export function parseSms(
     extractDate,
   } = e;
   for (const field of template?.required ?? []) {
-    const raw = e.value(text, field);
+    const raw = field === 'merchant' ? e.extractMerchant(message) : e.value(text, field);
     const valid =
       field === 'foreign'
         ? e.extractForeignAmount(text) !== undefined
@@ -139,7 +142,13 @@ export function parseSms(
   const merchant =
     kind.includes('transfer') || kind === 'card_payment'
       ? undefined
-      : (biller.name ?? extractMerchant(text));
+      : (biller.name ?? extractMerchant(message));
+  if (
+    (kind === 'purchase' || kind === 'refund') &&
+    !e.isCashback(text) &&
+    merchantReviewReason(merchant ?? '')
+  )
+    return { type: 'needs_review', reason: 'malformed_notification' };
   const transferName =
     kind.includes('transfer') || kind === 'card_payment'
       ? (extractDisplayName(references.beneficiaryValue) ??
@@ -186,7 +195,8 @@ export function extractReviewDraft(
   sender: string,
   config: ParserConfig,
 ): Partial<ParsedTransaction> {
-  const text = normalizeText(raw);
+  const message = normalizeMessage(raw);
+  const text = normalizeText(message);
   if (classify(text, config.shared.ignored)) return {};
   const source = resolveSmsSource(
     sender,
@@ -229,7 +239,7 @@ export function extractReviewDraft(
         reviewReferences.beneficiaryValue ??
           (positive ? reviewReferences.fromValue : reviewReferences.toValue),
       ))
-    : (e.extractBiller(text).name ?? e.extractMerchant(text));
+    : (e.extractBiller(text).name ?? e.extractMerchant(message));
   return {
     bank,
     kind,

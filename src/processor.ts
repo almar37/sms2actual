@@ -1,6 +1,6 @@
 import { matchMessageTemplate, type ConsoleConfig } from './console-config.js';
 import { resolveSmsSource } from './sms-source.js';
-import { createHash } from 'node:crypto';
+import { stableId } from './transaction-id.js';
 import { DateTime } from 'luxon';
 import type {
   ActualAdapter,
@@ -16,25 +16,11 @@ import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveTransferTarget } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
 import { transactionNotes } from './transaction-notes.js';
+import { merchantReviewReason } from './merchant-identity.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 // Historical imports used the parsed SMS suffix. Keep that stable whenever a
 // source identifier was present, only falling back to the resolved account.
-const stableId = (tx: ParsedTransaction, accountKey: string, suffix = 'main') =>
-  'sms:' +
-  createHash('sha256')
-    .update(
-      [
-        tx.bank,
-        tx.accountAlias ?? accountKey,
-        tx.kind,
-        tx.occurredAt,
-        tx.amountCents,
-        tx.payee,
-        suffix,
-      ].join('|'),
-    )
-    .digest('hex');
 export class Processor {
   private timer?: NodeJS.Timeout;
   private running = false;
@@ -50,8 +36,17 @@ export class Processor {
     private consoleConfig?: ConsoleConfig,
     private canProcess: () => boolean = () => true,
   ) {
-    this.merchantResolver =
-      merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
+    this.merchantResolver = merchantResolver ?? new MerchantResolver(store, actual, config);
+  }
+  async withActualAccess<T>(work: () => Promise<T>): Promise<T> {
+    if (this.running || !this.canProcess())
+      throw new Error('Actual is busy or not ready. Refresh and try again.');
+    this.running = true;
+    try {
+      return await work();
+    } finally {
+      this.running = false;
+    }
   }
   isBusy() {
     return this.running;
@@ -99,6 +94,13 @@ export class Processor {
     const imported = await this.actual.importTransactions(accountId, transactions);
     if (imported.errors.length)
       throw new Error(imported.errors.map((error) => error.message).join('; '));
+    for (const transaction of transactions)
+      if (transaction.imported_payee && transaction.payee_name)
+        this.store.recordMerchantImport(
+          transaction.imported_id,
+          transaction.payee_name,
+          transaction.category,
+        );
     return imported;
   }
   private observeCreditLimit(input: SmsInput, eventId: string) {
@@ -245,6 +247,7 @@ export class Processor {
       canCategorize &&
       tx.kind !== 'withdrawal' &&
       (!isTransfer || tx.payee !== 'Bank transfer') &&
+      !merchantReviewReason(tx.payee) &&
       !selectedCategory
     ) {
       const mapping = this.merchantResolver.lookup(account.id, tx.payee);
@@ -281,18 +284,21 @@ export class Processor {
         }));
         if (enrichment.status === 'success') {
           suggestion = enrichment.suggestion;
-          selectedPayee = suggestion.payee;
           const applied = suggestion.confidence >= this.minConfidence;
+          // The model may format a name, but only a confirmed alias can change its identity.
+          const payeeApplied = applied && merchantKey(suggestion.payee) === merchantKey(tx.payee);
+          if (payeeApplied) selectedPayee = suggestion.payee;
           if (applied) {
             selectedCategory = suggestion.categoryId;
-            this.merchantResolver.learnLocal(account.id, tx.payee, suggestion, event.id);
+            this.merchantResolver.learnSuggestion(account.id, tx.payee, suggestion, event.id);
           }
           this.store.update(event.id, 'processing', { suggestion });
           this.store.recordEnrichment(event.id, applied ? 'llm_success' : 'llm_low_confidence', {
             request,
             result: bounded(enrichment),
             threshold: this.minConfidence,
-            payeeApplied: true,
+            payeeApplied,
+            ...(!payeeApplied && applied ? { payeeReason: 'unconfirmed_merchant_alias' } : {}),
             categoryApplied: applied,
           });
         } else {
@@ -318,6 +324,8 @@ export class Processor {
         source_ref: `console-review:${event.id}`,
         decision_at: new Date().toISOString(),
       });
+    if (canCategorize) tx.importCategoryId = selectedCategory ?? null;
+    this.store.update(event.id, 'processing', { parsed: tx });
     const date = DateTime.fromISO(tx.occurredAt, { setZone: true }).toISODate()!;
     const notes = transactionNotes(tx, review);
     if (isTransfer) {
@@ -378,8 +386,8 @@ export class Processor {
         ]);
         const actualTransactionId = imported.added[0] ?? imported.updated[0];
         if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
-        if (tx.feeCents)
-          await this.importTransactions(account.id, [
+        if (tx.feeCents) {
+          const feeImport = await this.importTransactions(account.id, [
             {
               date,
               amount: -tx.feeCents,
@@ -389,6 +397,9 @@ export class Processor {
               imported_id: stableId(tx, account.key, 'fee'),
             },
           ]);
+          tx.importedFeeId = feeImport.added[0] ?? feeImport.updated[0] ?? tx.importedFeeId;
+          this.store.update(event.id, 'processing', { parsed: tx });
+        }
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -412,8 +423,8 @@ export class Processor {
         ]);
         const actualTransactionId = imported.added[0] ?? imported.updated[0];
         if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
-        if (tx.feeCents)
-          await this.importTransactions(account.id, [
+        if (tx.feeCents) {
+          const feeImport = await this.importTransactions(account.id, [
             {
               date,
               amount: -tx.feeCents,
@@ -423,6 +434,9 @@ export class Processor {
               imported_id: stableId(tx, account.key, 'fee'),
             },
           ]);
+          tx.importedFeeId = feeImport.added[0] ?? feeImport.updated[0] ?? tx.importedFeeId;
+          this.store.update(event.id, 'processing', { parsed: tx });
+        }
         this.store.recordTransfer(
           event.id,
           account.key,

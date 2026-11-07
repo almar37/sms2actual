@@ -207,6 +207,11 @@ export class ActualConnection implements ActualAdapter {
   transactions(...args: Parameters<ActualAdapter['transactions']>) {
     return this.adapter().transactions(...args);
   }
+  async updateTransactions(...args: Parameters<NonNullable<ActualAdapter['updateTransactions']>>) {
+    const adapter = this.adapter();
+    if (!adapter.updateTransactions) throw new Error('Actual transaction editing is unavailable');
+    return adapter.updateTransactions(...args);
+  }
   transferPayee(id: string) {
     return this.adapter().transferPayee(id);
   }

@@ -76,8 +76,8 @@
 </div>
 <div class="info-box subtle">
   <Icon name="ai" size={20} /><span
-    >Merchant history is checked before AI. Your edits are remembered per account and take effect on
-    future messages.</span
+    >Confirmed merchants are checked before AI. Suggestions marked for review are not reused until
+    you confirm them. Your edits are remembered per account for future messages.</span
   >
 </div>
 {#if error}<div class="error" role="alert">{error}</div>{/if}
@@ -105,7 +105,10 @@
             ><td
               ><div class="payee-cell">
                 <span class="merchant-avatar">{m.payee.slice(0, 1).toUpperCase()}</span>
-                <div><strong>{m.payee}</strong><small>{m.merchant_key}</small></div>
+                <div>
+                  <strong>{m.payee}</strong><small>{m.merchant_key}</small
+                  >{#if m.reviewReason}<small>{m.reviewReason}</small>{/if}
+                </div>
               </div></td
             ><td
               >{catalog.accounts.find((a: any) => a.id === m.account_id)?.name ?? m.account_id}</td
@@ -115,13 +118,13 @@
                   'Category unavailable'}</span
               ></td
             ><td
-              >{m.source_ref?.startsWith('console:')
+              >{m.source === 'local'
                 ? 'Your edit'
                 : m.source === 'actual'
                   ? 'Actual history'
-                  : 'SMS / AI'}</td
+                  : 'AI suggestion'}</td
             ><td class="muted">{when(m.updated_at)}</td><td
-              ><button onclick={() => edit(m)}>Edit</button></td
+              ><button onclick={() => edit(m)}>{m.reviewReason ? 'Review' : 'Edit'}</button></td
             ></tr
           >{/each}</tbody
       >

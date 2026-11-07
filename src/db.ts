@@ -31,7 +31,7 @@ export interface MerchantMapping {
   merchant_key: string;
   payee: string;
   category_id: string;
-  source: 'actual' | 'local';
+  source: 'actual' | 'local' | 'ai';
   source_ref: string | null;
   decision_at: string;
   updated_at: string;
@@ -64,6 +64,7 @@ export class EventStore {
     CREATE TABLE IF NOT EXISTS merchant_mappings(account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,source TEXT NOT NULL,source_ref TEXT,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(account_id,merchant_key));
     CREATE TABLE IF NOT EXISTS actual_mapping_observations(actual_transaction_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,transaction_date TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS local_mapping_observations(source_ref TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS merchant_import_baselines(imported_id TEXT PRIMARY KEY,payee TEXT NOT NULL,category_id TEXT);
     CREATE TABLE IF NOT EXISTS inbox_sync_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),cursor_date INTEGER NOT NULL,cursor_id INTEGER NOT NULL,updated_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS event_queue ON events(status,next_attempt_at);
     CREATE INDEX IF NOT EXISTS event_history_event ON event_history(event_id,id);
@@ -79,6 +80,20 @@ export class EventStore {
       this.db.exec('ALTER TABLE events ADD COLUMN enrichment_status TEXT');
     if (!columns.some((column) => column.name === 'actual_transaction_id'))
       this.db.exec('ALTER TABLE events ADD COLUMN actual_transaction_id TEXT');
+    const mappingColumns = this.db
+      .prepare('PRAGMA table_info(local_mapping_observations)')
+      .all() as { name: string }[];
+    if (!mappingColumns.some((column) => column.name === 'source'))
+      this.db.transaction(() => {
+        this.db.exec(
+          "ALTER TABLE local_mapping_observations ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+        );
+        // Old automatic enrichments shared the same source as explicit user edits.
+        this.db.exec(`UPDATE local_mapping_observations SET source='ai'
+          WHERE source_ref NOT LIKE 'console:%' AND source_ref NOT LIKE 'console-review:%';
+          UPDATE merchant_mappings SET source='ai' WHERE source='local'
+          AND (source_ref IS NULL OR (source_ref NOT LIKE 'console:%' AND source_ref NOT LIKE 'console-review:%'));`);
+      })();
     this.backfillAudit();
   }
   enqueue(input: SmsInput): { id: string; duplicate: boolean } {
@@ -450,7 +465,9 @@ export class EventStore {
       .prepare(
         `INSERT INTO merchant_mappings(account_id,merchant_key,payee,category_id,source,source_ref,decision_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
          ON CONFLICT(account_id,merchant_key) DO UPDATE SET payee=excluded.payee,category_id=excluded.category_id,source=excluded.source,source_ref=excluded.source_ref,decision_at=excluded.decision_at,updated_at=excluded.updated_at
-         WHERE excluded.decision_at>=merchant_mappings.decision_at`,
+         WHERE (CASE excluded.source WHEN 'local' THEN 2 WHEN 'actual' THEN 1 ELSE 0 END) >
+           (CASE merchant_mappings.source WHEN 'local' THEN 2 WHEN 'actual' THEN 1 ELSE 0 END)
+           OR (excluded.source=merchant_mappings.source AND excluded.decision_at>=merchant_mappings.decision_at)`,
       )
       .run(
         mapping.account_id,
@@ -463,13 +480,15 @@ export class EventStore {
         now,
       );
   }
-  putLocalMapping(mapping: Omit<MerchantMapping, 'updated_at' | 'source'>) {
+  putLocalMapping(
+    mapping: Omit<MerchantMapping, 'updated_at' | 'source'> & { source?: 'local' | 'ai' },
+  ) {
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO local_mapping_observations(source_ref,account_id,merchant_key,payee,category_id,decision_at,updated_at) VALUES(?,?,?,?,?,?,?)
-           ON CONFLICT(source_ref) DO UPDATE SET account_id=excluded.account_id,merchant_key=excluded.merchant_key,payee=excluded.payee,category_id=excluded.category_id,decision_at=excluded.decision_at,updated_at=excluded.updated_at`,
+          `INSERT INTO local_mapping_observations(source_ref,account_id,merchant_key,payee,category_id,decision_at,updated_at,source) VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(source_ref) DO UPDATE SET account_id=excluded.account_id,merchant_key=excluded.merchant_key,payee=excluded.payee,category_id=excluded.category_id,decision_at=excluded.decision_at,updated_at=excluded.updated_at,source=excluded.source`,
         )
         .run(
           mapping.source_ref,
@@ -479,8 +498,9 @@ export class EventStore {
           mapping.category_id,
           mapping.decision_at,
           now,
+          mapping.source ?? 'local',
         );
-      this.putMapping({ ...mapping, source: 'local' });
+      this.putMapping({ ...mapping, source: mapping.source ?? 'local' });
     })();
   }
   replaceActualMappings(
@@ -491,6 +511,7 @@ export class EventStore {
       payee: string;
       categoryId: string;
       transactionDate: string;
+      corrected?: boolean;
     }[],
     now: string,
   ) {
@@ -499,10 +520,11 @@ export class EventStore {
         (
           this.db
             .prepare(
-              'SELECT actual_transaction_id,category_id,decision_at FROM actual_mapping_observations',
+              'SELECT actual_transaction_id,payee,category_id,decision_at FROM actual_mapping_observations',
             )
             .all() as {
             actual_transaction_id: string;
+            payee: string;
             category_id: string;
             decision_at: string;
           }[]
@@ -515,9 +537,10 @@ export class EventStore {
       for (const input of inputs) {
         const previous = old.get(input.actualTransactionId);
         const decisionAt =
-          previous && previous.category_id !== input.categoryId
+          previous && (previous.category_id !== input.categoryId || previous.payee !== input.payee)
             ? now
-            : (previous?.decision_at ?? `${input.transactionDate}T00:00:00.000Z`);
+            : (previous?.decision_at ??
+              (input.corrected ? now : `${input.transactionDate}T00:00:00.000Z`));
         insert.run(
           input.actualTransactionId,
           input.accountId,
@@ -532,7 +555,7 @@ export class EventStore {
       this.db.prepare('DELETE FROM merchant_mappings').run();
       const candidates = this.db
         .prepare(
-          `SELECT account_id,merchant_key,payee,category_id,'local' source,source_ref,decision_at FROM local_mapping_observations
+          `SELECT account_id,merchant_key,payee,category_id,source,source_ref,decision_at FROM local_mapping_observations
            UNION ALL
            SELECT account_id,merchant_key,payee,category_id,'actual' source,actual_transaction_id source_ref,decision_at FROM actual_mapping_observations
            ORDER BY decision_at,source_ref`,
@@ -540,6 +563,19 @@ export class EventStore {
         .all() as Omit<MerchantMapping, 'updated_at'>[];
       for (const candidate of candidates) this.putMapping(candidate);
     })();
+  }
+  recordMerchantImport(importedId: string, payee: string, categoryId?: string) {
+    this.db
+      .prepare(
+        `INSERT INTO merchant_import_baselines(imported_id,payee,category_id) VALUES(?,?,?)
+      ON CONFLICT(imported_id) DO NOTHING`,
+      )
+      .run(importedId, payee, categoryId ?? null);
+  }
+  merchantImport(importedId: string) {
+    return this.db
+      .prepare('SELECT payee,category_id FROM merchant_import_baselines WHERE imported_id=?')
+      .get(importedId) as { payee: string; category_id: string | null } | undefined;
   }
   private insertHistory(
     eventId: string,

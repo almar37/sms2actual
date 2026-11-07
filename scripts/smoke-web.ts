@@ -7,7 +7,7 @@ import { ConsoleConfig } from '../src/console-config.js';
 import { createConsoleAuth } from '../src/console-auth.js';
 import { buildServer } from '../src/server.js';
 import { NoopEnricher } from '../src/enricher.js';
-import type { ActualAdapter, ResolvedConfig } from '../src/types.js';
+import type { ActualAdapter, ResolvedConfig, HistoricalTransaction } from '../src/types.js';
 import type { Processor } from '../src/processor.js';
 import { ActualConnection } from '../src/actual-connection.js';
 import { currentBudgetDate } from '../src/budget-date.js';
@@ -111,6 +111,61 @@ store.update(transferEvent.id, 'imported', {
     note: 'Synthetic transfer fixture',
   },
 });
+const rejectedCategoryEvent = store.enqueue({
+  sender: 'SAB',
+  message: 'Air Arabia category example',
+  receivedAt: new Date().toISOString(),
+});
+store.update(rejectedCategoryEvent.id, 'imported', {
+  parsed: {
+    bank: 'sab',
+    kind: 'purchase',
+    accountAlias: '1234',
+    amountCents: -94570,
+    feeCents: 0,
+    payee: 'AIR ARABI',
+    occurredAt: new Date().toISOString(),
+    note: 'Parsed sab purchase',
+  },
+  suggestion: {
+    payee: 'Air Arabia',
+    categoryId: 'shopping',
+    confidence: 0.55,
+    reason: 'No travel category available',
+  },
+});
+store.recordEnrichment(rejectedCategoryEvent.id, 'llm_low_confidence', {
+  threshold: 0.7,
+  categoryApplied: false,
+});
+const editableEvent = store.enqueue({
+  sender: 'SAB',
+  message: 'Editable imported purchase',
+  receivedAt: new Date().toISOString(),
+});
+store.update(editableEvent.id, 'imported', {
+  actualTransactionId: 'editable-actual',
+  parsed: {
+    bank: 'sab',
+    kind: 'purchase',
+    accountAlias: '1234',
+    amountCents: -94570,
+    feeCents: 0,
+    payee: 'AIR ARABI',
+    occurredAt: new Date().toISOString(),
+    note: 'Parsed sab purchase',
+  },
+});
+const editableRows: HistoricalTransaction[] = [
+  {
+    id: 'editable-actual',
+    accountId: 'checking',
+    date: '2026-11-07',
+    amount: -94570,
+    payeeName: 'Air Arabia from Actual',
+    notes: 'Actual notes',
+  },
+];
 let remoteRevision = 0,
   syncedRevision = 0,
   failNextSync = false;
@@ -136,6 +191,7 @@ const actual: ActualAdapter = {
     (({ checking: 1854320, savings: 4200000, credit: -124850 })[id] ?? 0) +
     (id === 'checking' ? syncedRevision * 10000 : 0),
   transactions: async (id) => [
+    ...editableRows.filter((row) => row.accountId === id),
     ...(syncedRevision && id === 'checking'
       ? [
           {
@@ -157,6 +213,20 @@ const actual: ActualAdapter = {
       amount: [-2500, -13475, -8900, 1500000][i],
     })),
   ],
+  updateTransactions: async (updates) => {
+    for (const update of updates)
+      Object.assign(
+        editableRows.find((row) => row.id === update.id)!,
+        {
+          accountId: update.accountId,
+          amount: update.amount,
+          date: update.date,
+          categoryId: update.categoryId ?? undefined,
+          payeeName: update.payeeName,
+          notes: update.notes,
+        },
+      );
+  },
   transferPayee: async () => '',
   importTransactions: async () => ({ added: [], updated: [], errors: [] }),
 };
@@ -173,7 +243,11 @@ const app = buildServer({
   apiKey: setupKey,
   banks,
   store,
-  processor: { tick: async () => {}, setMinConfidence: () => {} } as unknown as Processor,
+  processor: {
+    tick: async () => {},
+    setMinConfidence: () => {},
+    withActualAccess: async (work: () => Promise<unknown>) => work(),
+  } as unknown as Processor,
   ready: () => true,
   console: {
     auth,
@@ -275,7 +349,7 @@ try {
   await expect(page.getByRole('combobox', { name: /^Counterparty account/ })).toHaveValue(
     'savings',
   );
-  await expect(page.getByRole('button', { name: /Approve & import/ })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /Save to Actual/ })).toBeDisabled();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: reviewTransferMessage, exact: true }).click();
   const transferReview = page.getByRole('dialog', { name: 'Review message' });
@@ -318,6 +392,30 @@ try {
     animations: 'disabled',
   });
   await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Air Arabia category example', exact: true }).click();
+  const categoryReview = page.getByRole('dialog', { name: 'Review message' });
+  await expect(categoryReview).toContainText('Imported · category needs review');
+  await expect(categoryReview).toContainText('55% confidence, below the 70% threshold');
+  await expect(categoryReview.getByRole('combobox', { name: /^Category/ })).toHaveValue('');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Editable imported purchase', exact: true }).click();
+  const importedEditor = page.getByRole('dialog', { name: 'Review message' });
+  await expect(importedEditor.getByRole('textbox', { name: /^Payee/ })).toHaveValue(
+    'Air Arabia from Actual',
+  );
+  await expect(importedEditor.getByRole('textbox', { name: 'Notes', exact: true })).toHaveValue(
+    'Actual notes',
+  );
+  await importedEditor.getByRole('combobox', { name: /^Category/ }).selectOption('food');
+  await importedEditor.getByRole('textbox', { name: 'Notes', exact: true }).fill('Flight booking');
+  await importedEditor.getByRole('button', { name: 'Save to Actual', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Transaction updated in Actual.');
+  expect(editableRows[0]).toMatchObject({
+    id: 'editable-actual',
+    categoryId: 'food',
+    notes: 'Flight booking',
+  });
+  expect(editableRows).toHaveLength(1);
   await page.getByRole('button', { name: 'Unfamiliar bank message for review' }).click();
   await expect(page.getByRole('dialog', { name: 'Review message' })).toBeVisible();
   const review = page.getByRole('dialog', { name: 'Review message' });

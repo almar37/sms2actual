@@ -9,7 +9,7 @@ describe('SMS parser fixture corpus', () => {
   });
 
   it('tracks the parser release represented by the corpus', () => {
-    expect(PARSER_REVISION).toBe(15);
+    expect(PARSER_REVISION).toBe(16);
   });
 });
 
@@ -110,6 +110,19 @@ describe('Al Rajhi compact online purchases', () => {
     });
   });
 
+  it.each(['\n', '\\n', '\r\n', '\\r\\n'])(
+    'bounds the merchant without a balance using %j',
+    (newline) => {
+      const sms = ['شراء إنترنت بـSR 42.35', 'عبر4187;فيزا', 'لـAmazon sa', '5/11/26 21:34'].join(
+        newline,
+      );
+      expect(parse(sms)).toMatchObject({
+        type: 'transaction',
+        transaction: { payee: 'Amazon sa', amountCents: -4235 },
+      });
+    },
+  );
+
   it.each([
     ['missing amount', message.replace('SR 42.35', 'SR')],
     ['foreign amount', message.replace('SR 42.35', 'USD 42.35')],
@@ -121,6 +134,77 @@ describe('Al Rajhi compact online purchases', () => {
     ['empty merchant with newlines', message.replace('Amazon sa', '').replaceAll('\\n', '\n')],
   ])('holds a notification with %s for review', (_name, sms) => {
     expect(parse(sms!)).toStrictEqual({ type: 'needs_review', reason: 'malformed_notification' });
+  });
+});
+
+describe('Al Rajhi merchant integrity', () => {
+  const parse = (sms: string) =>
+    parseSms(sms, '2026-11-07T19:09:21.169Z', banks, 'AlRajhiBank', parsing);
+  it.each(['\n', '\\n', '\r\n', '\\r\\n'])('parses Arabic POS with %j', (newline) => {
+    const sms = [
+      'شراء عبر نقاط البيع',
+      'بطاقة:8077 ;فيزا',
+      'لدى:MYSR*Jahe',
+      'مبلغ:٧٧٫٥ SAR',
+      'رصيد:٢٠٬٠٢٠٫٨٨ SAR',
+      '؜7/11/26 22:09',
+    ].join(newline);
+    expect(parse(sms)).toMatchObject({
+      type: 'transaction',
+      transaction: { payee: 'MYSR*Jahe', amountCents: -7750, balanceCents: 2002088 },
+    });
+  });
+  it.each(['SHOP COUNTRY MARKET', 'Coffee, Books & Co.', 'متجر في الرياض', 'متجر ٢٤'])(
+    'preserves %s exactly',
+    (merchant) => {
+      expect(
+        parse(`POS Purchase\nCard:8077;Visa\nAt:${merchant}\nAmount:SAR 20\nBalance:SAR 100`),
+      ).toMatchObject({
+        type: 'transaction',
+        transaction: { payee: merchant, amountCents: -2000 },
+      });
+    },
+  );
+  it.each(['Online Purchase', 'Reverse Transaction', 'شراء عبر نقاط البيع', 'عكس عملية'])(
+    'requires a merchant for %s',
+    (header) => {
+      for (const merchant of [
+        '',
+        'At:\n',
+        'لدى:\n',
+        'At:Unknown merchant\n',
+        'At:5/11/26 21:34\n',
+        'At:٥/١١/٢٦ ٢١:٣٤\n',
+        'At:Amount:SAR 20\n',
+        'At:One\nAt:Two\n',
+      ]) {
+        expect(
+          parse(`${header}\nCard:8077;Visa\n${merchant}Amount:SAR 20\nBalance:SAR 100`),
+        ).toEqual({ type: 'needs_review', reason: 'malformed_notification' });
+      }
+    },
+  );
+  it('uses delimited fields on a single line without truncating label words in the name', () => {
+    expect(
+      parse('Online Purchase Card:8077;Visa At:SHOP COUNTRY MARKET Amount:SAR 20 Balance:SAR 100'),
+    ).toMatchObject({ type: 'transaction', transaction: { payee: 'SHOP COUNTRY MARKET' } });
+  });
+  it('preserves a refund merchant across transport formats', () => {
+    for (const newline of ['\n', '\\n', '\r\n'])
+      expect(
+        parse(
+          [
+            'Reverse Transaction',
+            'By:2393;Visa',
+            'At:Coffee, Books & Co.',
+            'Amount:SAR 20',
+            '5/11/26 21:34',
+          ].join(newline),
+        ),
+      ).toMatchObject({
+        type: 'transaction',
+        transaction: { kind: 'refund', payee: 'Coffee, Books & Co.', amountCents: 2000 },
+      });
   });
 });
 

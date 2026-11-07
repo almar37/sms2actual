@@ -179,7 +179,7 @@ describe('credit-card repayment funding defaults', () => {
 
   it.each([
     'Incoming transfer To: 2393 Amount: SAR 80.50 Balance: SAR 1200.10',
-    'Refund Card:2393 Amount: SAR 80.50 Balance: SAR 1200.10',
+    'Refund Card:2393 Amount: SAR 80.50 At:Example Balance: SAR 1200.10',
     'Purchase Card:2393 Amount: SAR 80.50 at Example Balance: SAR 1200.10',
   ])('leaves unrelated transactions independent of the funding default: %s', async (message) => {
     const { store, transferPayees, processor } = setup({

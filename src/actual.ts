@@ -1,6 +1,6 @@
 import { loadActualApi } from './actual-sdk.js';
 import { currentBudgetDate } from './budget-date.js';
-import type { ActualAdapter, ActualTransaction } from './types.js';
+import type { ActualAdapter, ActualTransaction, ActualTransactionUpdate } from './types.js';
 
 export class ActualApiAdapter implements ActualAdapter {
   constructor(
@@ -60,7 +60,7 @@ export class ActualApiAdapter implements ActualAdapter {
   }
   async transactions(accountId: string, startDate: string, endDate: string, limit?: number) {
     const actual = await loadActualApi();
-    const payees = new Map((await actual.getPayees()).map((payee) => [payee.id, payee.name]));
+    const payees = new Map((await actual.getPayees()).map((payee) => [payee.id, payee]));
     const rows = limit
       ? (
           (await actual.aqlQuery(
@@ -79,12 +79,47 @@ export class ActualApiAdapter implements ActualAdapter {
       amount: transaction.amount,
       accountId: transaction.account,
       date: transaction.date,
-      payeeName: transaction.payee ? payees.get(transaction.payee) : undefined,
+      payeeName: transaction.payee ? payees.get(transaction.payee)?.name : undefined,
       importedPayee: transaction.imported_payee,
       categoryId: transaction.category,
       importedId: transaction.imported_id,
       transferId: transaction.transfer_id,
+      transferAccountId: transaction.payee
+        ? (payees.get(transaction.payee)?.transfer_acct ?? undefined)
+        : undefined,
+      notes: transaction.notes ?? '',
+      isSplit: Boolean(transaction.is_parent || transaction.parent_id),
     }));
+  }
+  async updateTransactions(updates: ActualTransactionUpdate[]) {
+    const actual = await loadActualApi();
+    const payees = await actual.getPayees();
+    // Resolve every payee before changing transactions. Never rename a shared payee.
+    const resolved: { update: ActualTransactionUpdate; payee: string }[] = [];
+    for (const update of updates) {
+      let payee = update.transferAccountId
+        ? payees.find((p) => p.transfer_acct === update.transferAccountId)?.id
+        : payees.find((p) => !p.transfer_acct && p.name === update.payeeName)?.id;
+      if (update.transferAccountId && !payee)
+        throw new Error('Destination account has no Actual transfer payee');
+      if (!payee) {
+        payee = await actual.createPayee({ name: update.payeeName });
+        payees.push({ id: payee, name: update.payeeName, transfer_acct: undefined });
+      }
+      resolved.push({ update, payee });
+    }
+    await actual.batchBudgetUpdates(async () => {
+      for (const { update, payee } of resolved) {
+        await actual.updateTransaction(update.id, {
+          account: update.accountId,
+          date: update.date,
+          amount: update.amount,
+          payee,
+          category: update.transferAccountId ? null : update.categoryId,
+          notes: update.notes,
+        } as any);
+      }
+    });
   }
   async transferPayee(accountId: string) {
     const actual = await loadActualApi();

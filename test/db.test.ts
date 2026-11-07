@@ -51,6 +51,50 @@ describe('event store', () => {
     s.recover();
     expect(s.claim()?.id).toBe(id);
   });
+  it('quarantines legacy AI mappings on upgrade and preserves explicit rules and import baselines', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sms2actual-mappings-'));
+    const path = join(directory, 'events.sqlite');
+    try {
+      const first = new EventStore(path);
+      try {
+        for (const sourceRef of ['legacy-ai-event', 'console:rule', 'console-review:event'])
+          first.putLocalMapping({
+            account_id: 'checking',
+            merchant_key: sourceRef,
+            payee: 'Merchant',
+            category_id: 'food',
+            source_ref: sourceRef,
+            decision_at: '2026-01-01T00:00:00.000Z',
+          });
+        first.recordMerchantImport('sms:import', 'Original', 'food');
+        first.recordMerchantImport(
+          'sms:import',
+          'Retry should not replace the baseline',
+          'shopping',
+        );
+        first.db.exec('ALTER TABLE local_mapping_observations DROP COLUMN source');
+      } finally {
+        first.close();
+      }
+      const restored = new EventStore(path);
+      try {
+        expect(restored.mapping('checking', 'legacy-ai-event')?.source).toBe('ai');
+        expect(restored.mapping('checking', 'console:rule')?.source).toBe('local');
+        expect(restored.mapping('checking', 'console-review:event')?.source).toBe('local');
+        restored.replaceActualMappings([], '2026-11-08T00:00:00.000Z');
+        expect(restored.mapping('checking', 'legacy-ai-event')?.source).toBe('ai');
+        restored.resetSmsData();
+        expect(restored.merchantImport('sms:import')).toEqual({
+          payee: 'Original',
+          category_id: 'food',
+        });
+      } finally {
+        restored.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it('claims identical-timestamp events in insertion order', () => {
     const s = new EventStore(':memory:');
     stores.push(s);

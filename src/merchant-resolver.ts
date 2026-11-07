@@ -2,23 +2,16 @@ import type {
   ActualAdapter,
   AiSuggestion,
   HistoricalTransaction,
+  ParsedTransaction,
   ResolvedConfig,
 } from './types.js';
 import { EventStore, type MerchantMapping } from './db.js';
 import { resolveAccount } from './routing.js';
 import { currentBudgetDate } from './budget-date.js';
+import { stableId } from './transaction-id.js';
+import { merchantKey, merchantReviewReason } from './merchant-identity.js';
 
-const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
-
-export function merchantKey(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[٠-٩]/gu, (digit) => String(arabicDigits.indexOf(digit)))
-    .toLocaleLowerCase('en-US')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
-}
+export { merchantKey } from './merchant-identity.js';
 
 export class MerchantResolver {
   private activeCategoryIds = new Set<string>();
@@ -29,23 +22,26 @@ export class MerchantResolver {
     private store: EventStore,
     private actual: ActualAdapter,
     private config: ResolvedConfig,
-    private minConfidence: number,
   ) {}
 
   lookup(accountId: string, merchant: string): MerchantMapping | undefined {
+    if (merchantReviewReason(merchant)) return;
     const mapping = this.store.mapping(accountId, merchantKey(merchant));
-    return mapping && (!this.categoriesLoaded || this.activeCategoryIds.has(mapping.category_id))
+    return mapping &&
+      mapping.source !== 'ai' &&
+      (!this.categoriesLoaded || this.activeCategoryIds.has(mapping.category_id))
       ? mapping
       : undefined;
   }
 
-  learnLocal(
+  learnSuggestion(
     accountId: string,
     merchant: string,
     suggestion: AiSuggestion,
     eventId: string,
     decisionAt = new Date().toISOString(),
   ) {
+    if (merchantReviewReason(merchant)) return;
     this.store.putLocalMapping({
       account_id: accountId,
       merchant_key: merchantKey(merchant),
@@ -53,6 +49,7 @@ export class MerchantResolver {
       category_id: suggestion.categoryId,
       source_ref: eventId,
       decision_at: decisionAt,
+      source: 'ai',
     });
   }
 
@@ -73,14 +70,14 @@ export class MerchantResolver {
         .map((category) => category.id),
     );
     this.categoriesLoaded = true;
-    this.seedLocalMappings();
     const accountIds = [...new Set(this.config.accounts.map((account) => account.id))];
     const end = currentBudgetDate();
     const histories = await Promise.all(
       accountIds.map((accountId) => this.actual.transactions(accountId, '1900-01-01', end)),
     );
-    const observations = histories
-      .flat()
+    const transactions = histories.flat();
+    this.seedImportBaselines(transactions);
+    const observations = transactions
       .map((transaction) => this.observation(transaction))
       .filter((observation) => observation !== undefined);
     this.store.replaceActualMappings(observations, new Date().toISOString());
@@ -90,11 +87,26 @@ export class MerchantResolver {
     if (
       !transaction.categoryId ||
       !this.activeCategoryIds.has(transaction.categoryId) ||
-      transaction.transferId
+      transaction.transferId ||
+      transaction.transferAccountId ||
+      transaction.isSplit
     )
       return undefined;
     const description = transaction.importedPayee || transaction.payeeName;
-    if (!description) return undefined;
+    if (!description || merchantReviewReason(description)) return undefined;
+    const serviceImport =
+      transaction.importedId?.startsWith('sms:') || transaction.importedId?.startsWith('sms-edit:');
+    if (serviceImport && transaction.importedId) {
+      const baseline = this.store.merchantImport(transaction.importedId);
+      // A service import is evidence only after its payee/category has been corrected.
+      // Missing baselines (for example after a legacy reset) cannot establish consent.
+      if (
+        !baseline ||
+        (baseline.payee === (transaction.payeeName || description) &&
+          baseline.category_id === transaction.categoryId)
+      )
+        return undefined;
+    }
     return {
       actualTransactionId: transaction.id,
       accountId: transaction.accountId,
@@ -102,22 +114,53 @@ export class MerchantResolver {
       payee: transaction.payeeName || description,
       categoryId: transaction.categoryId,
       transactionDate: transaction.date,
+      corrected: serviceImport,
     };
   }
 
-  private seedLocalMappings() {
+  private seedImportBaselines(transactions: HistoricalTransaction[]) {
+    const byId = new Map(transactions.map((transaction) => [transaction.id, transaction]));
     const rows = this.store.db
       .prepare(
-        "SELECT id,parsed,suggestion,updated_at FROM events WHERE parsed IS NOT NULL AND suggestion IS NOT NULL AND status IN ('imported','imported_review')",
+        "SELECT id,parsed,suggestion,actual_transaction_id FROM events WHERE parsed IS NOT NULL AND status IN ('imported','imported_review')",
       )
-      .all() as { id: string; parsed: string; suggestion: string; updated_at: string }[];
+      .all() as {
+      id: string;
+      parsed: string;
+      suggestion: string | null;
+      actual_transaction_id: string | null;
+    }[];
     for (const row of rows) {
-      const transaction = JSON.parse(row.parsed);
-      const suggestion = JSON.parse(row.suggestion) as AiSuggestion;
-      if (suggestion.confidence < this.minConfidence) continue;
+      const transaction = JSON.parse(row.parsed) as ParsedTransaction;
       const account = resolveAccount(this.config.accounts, transaction);
-      if (account)
-        this.learnLocal(account.id, transaction.payee, suggestion, row.id, row.updated_at);
+      const importedId =
+        (row.actual_transaction_id ? byId.get(row.actual_transaction_id)?.importedId : undefined) ??
+        (account ? stableId(transaction, account.key) : undefined);
+      if (!importedId || this.store.merchantImport(importedId)) continue;
+      const attempts = this.store.enrichmentAttempts(row.id);
+      if (attempts.some((attempt) => attempt.status === 'user_actual_update')) continue;
+      const decision = attempts.findLast((attempt) =>
+        ['history_hit', 'llm_success', 'llm_low_confidence'].includes(attempt.status),
+      );
+      const history =
+        decision?.status === 'history_hit'
+          ? (JSON.parse(decision.details) as { payee: string; categoryId: string })
+          : undefined;
+      const aiAttempt = decision?.status.startsWith('llm_') ? decision : undefined;
+      const ai = aiAttempt
+        ? (JSON.parse(aiAttempt.details) as { payeeApplied?: boolean })
+        : undefined;
+      const suggestion = row.suggestion ? (JSON.parse(row.suggestion) as AiSuggestion) : undefined;
+      // Legacy suggestion rows without application evidence cannot prove a later edit.
+      if (suggestion && !history && ai?.payeeApplied === undefined) continue;
+      const payee =
+        ai?.payeeApplied && suggestion ? suggestion.payee : (history?.payee ?? transaction.payee);
+      const category =
+        transaction.importCategoryId !== undefined
+          ? (transaction.importCategoryId ?? undefined)
+          : (history?.categoryId ??
+            (aiAttempt?.status === 'llm_success' ? suggestion?.categoryId : undefined));
+      this.store.recordMerchantImport(importedId, payee, category);
     }
   }
 }

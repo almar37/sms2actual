@@ -23,12 +23,14 @@ import {
 import type { ConsoleAuth } from './console-auth.js';
 import { validateAccountRules } from './config.js';
 import { merchantKey } from './merchant-resolver.js';
+import { merchantReviewReason } from './merchant-identity.js';
 import { extractReviewDraft, parseSms } from './parser.js';
 import { resolveSmsSource } from './sms-source.js';
 import { resolveTransferTarget } from './routing.js';
 import { generateTaskerProject } from './tasker-export.js';
 import { currentBudgetDate } from './budget-date.js';
 import { actualConnectionSchema, type ActualConnection } from './actual-connection.js';
+import { readMessageActual, saveMessageActual, type MessageActualState } from './message-sync.js';
 import { transactionNotes } from './transaction-notes.js';
 
 export interface ConsoleOptions {
@@ -46,13 +48,25 @@ export interface ConsoleOptions {
   taskerTemplatePath?: string;
 }
 const readJson = (value: string | null) => (value ? JSON.parse(value) : null);
-const eventView = (e: StoredEvent) => ({
-  ...e,
-  input: readJson(e.payload),
-  parsed: readJson(e.parsed),
-  suggestion: readJson(e.suggestion),
-  payload: undefined,
-});
+const eventView = (e: StoredEvent) => {
+  const parsed = readJson(e.parsed) as ParsedTransaction | null;
+  const imported = e.status === 'imported' || e.status === 'imported_review';
+  const categoryNeedsAttention =
+    imported &&
+    parsed?.kind !== 'withdrawal' &&
+    (parsed?.importCategoryId === null ||
+      (parsed?.importCategoryId === undefined &&
+        e.enrichment_status?.startsWith('llm_') &&
+        e.enrichment_status !== 'llm_success'));
+  return {
+    ...e,
+    input: readJson(e.payload),
+    parsed,
+    suggestion: readJson(e.suggestion),
+    categoryNeedsAttention: Boolean(categoryNeedsAttention),
+    payload: undefined,
+  };
+};
 export function registerConsole(
   app: FastifyInstance,
   options: ConsoleOptions,
@@ -354,18 +368,66 @@ export function registerConsole(
             (!hints.accountAlias || account.match.accountSuffixes?.includes(hints.accountAlias)),
         )
       : [];
+    const attempts = store.enrichmentAttempts(event.id);
+    const lastDecision = attempts.at(-1);
+    const decision = lastDecision ? readJson(lastDecision.details) : null;
+    const suggestion = readJson(event.suggestion);
+    const imported = event.status === 'imported' || event.status === 'imported_review';
+    const categoryId =
+      tx?.importCategoryId !== undefined
+        ? tx.importCategoryId
+        : (manual?.categoryId ??
+          (lastDecision?.status === 'history_hit'
+            ? decision?.categoryId
+            : lastDecision?.status === 'llm_success'
+              ? suggestion?.categoryId
+              : null));
+    let actualState: MessageActualState | undefined;
+    let syncError: string | undefined;
+    if (imported) {
+      if (!options.actual.updateTransactions)
+        syncError = 'Actual transaction editing is unavailable';
+      else
+        try {
+          actualState = await processor.withActualAccess(() =>
+            readMessageActual(options.actual, store, options.config, event),
+          );
+        } catch (error) {
+          syncError = error instanceof Error ? error.message : String(error);
+        }
+    }
     return {
       ...eventView(event),
       reviewDraft,
+      categoryNeedsAttention: actualState
+        ? !actualState.form.categoryId &&
+          !actualState.form.targetAccountId &&
+          actualState.form.kind !== 'withdrawal'
+        : eventView(event).categoryNeedsAttention,
+      actualSync: imported
+        ? { form: actualState?.form, revision: actualState?.revision, error: syncError }
+        : null,
       sourceBank: options.config.banks.find((bank) => bank.id === hints?.bank)?.name ?? null,
       sourceAccountId: manualAccount?.id ?? (accounts.length === 1 ? accounts[0]!.id : null),
       targetAccountId,
-      categoryId: manual?.categoryId ?? readJson(event.suggestion)?.categoryId ?? null,
+      categoryId: imported
+        ? (categoryId ?? null)
+        : (manual?.categoryId ?? suggestion?.categoryId ?? null),
+      categorySuggestion: suggestion
+        ? {
+            ...suggestion,
+            applied:
+              !eventView(event).categoryNeedsAttention &&
+              (tx?.importCategoryId === suggestion.categoryId ||
+                lastDecision?.status === 'llm_success'),
+            threshold: decision?.threshold ?? null,
+          }
+        : null,
       notes: tx
         ? transactionNotes(tx, event.status === 'imported_review')
         : 'Reviewed in sms2actual',
       history: store.eventHistory(event.id),
-      enrichmentAttempts: store.enrichmentAttempts(event.id),
+      enrichmentAttempts: attempts,
     };
   });
   const action = z
@@ -379,6 +441,7 @@ export function registerConsole(
       targetAccountId: z.string().optional(),
       occurredAt: z.string().datetime({ offset: true }),
       notes: z.string().max(4000).optional(),
+      actualRevision: z.string().length(64).optional(),
     })
     .strict();
   app.post<{ Params: { id: string } }>('/api/console/events/:id/action', async (req, reply) => {
@@ -441,11 +504,32 @@ export function registerConsole(
       current.status === 'imported' ||
       current.status === 'imported_review' ||
       Boolean(current.actual_transaction_id);
-    if (imported)
-      return reply.code(409).send({
-        error:
-          'Already imported. Edit the transaction in Actual; use Save as template or the merchant editor for future messages.',
-      });
+    if (imported) {
+      if (!body.actualRevision)
+        return reply.code(409).send({
+          error: 'Reopen this message to load its current Actual transaction before saving',
+        });
+      try {
+        await processor.withActualAccess(() =>
+          saveMessageActual(
+            options.actual,
+            store,
+            options.config,
+            current,
+            body,
+            body.actualRevision!,
+          ),
+        );
+        return { ok: true, updated: true };
+      } catch (error) {
+        return reply.code(409).send({
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not update Actual. Reopen this message and try again',
+        });
+      }
+    }
     store.db.transaction(() => {
       store.db
         .prepare(
@@ -472,7 +556,16 @@ export function registerConsole(
     return { ok: true };
   });
   app.get('/api/console/merchants', async () => ({
-    merchants: store.db.prepare('SELECT * FROM merchant_mappings ORDER BY payee,account_id').all(),
+    merchants: (
+      store.db
+        .prepare('SELECT * FROM merchant_mappings ORDER BY payee,account_id')
+        .all() as import('./db.js').MerchantMapping[]
+    ).map((mapping) => ({
+      ...mapping,
+      reviewReason:
+        merchantReviewReason(mapping.merchant_key) ??
+        (mapping.source === 'ai' ? 'AI suggestion — confirm before reuse' : undefined),
+    })),
   }));
   app.put('/api/console/merchants', async (req, reply) => {
     const body = z
@@ -487,6 +580,10 @@ export function registerConsole(
     if (!body.success)
       return reply.code(400).send({ error: 'Enter a merchant, payee, account, and category' });
     const b = body.data;
+    if (merchantReviewReason(b.merchant))
+      return reply.code(400).send({
+        error: 'Use the merchant description without dates, times, or generic placeholders',
+      });
     if (
       !(await options.actual.accounts()).some((a) => a.id === b.accountId) ||
       !b.categoryId ||

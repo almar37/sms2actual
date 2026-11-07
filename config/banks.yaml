@@ -6,7 +6,12 @@ banks:
     senders: [SAB, Saudi Awwal, Saudi Awwal Bank, ساب, الأول]
     messageAliases: [SAB, Saudi Awwal, ساب, الأول]
   - id: alrajhi
-    templates: [alrajhi-own-transfer, alrajhi-online-purchase, alrajhi-card-payment-received]
+    templates:
+      - alrajhi-own-transfer
+      - alrajhi-online-purchase
+      - alrajhi-card-payment-received
+      - alrajhi-card-purchase
+      - alrajhi-card-refund
     name: Al Rajhi
     senders: [AlRajhiBank, Al Rajhi, AlRajhi, الراجحي, بنك الراجحي]
     messageAliases: [Al Rajhi, AlRajhi, الراجحي]

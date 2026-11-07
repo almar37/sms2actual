@@ -2,6 +2,17 @@ import { DateTime } from 'luxon';
 import type { CompiledFields, Field } from './config.js';
 const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
 
+/** Preserve merchant spelling and field boundaries; normalize transport escaping only. */
+export function normalizeMessage(value: string): string {
+  return value
+    .replace(/\\r\\n|\\n|\\r|\r\n?/g, '\n')
+    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .split('\n')
+    .map((line) => line.replace(/[^\S\n]+/g, ' ').trim())
+    .join('\n')
+    .trim();
+}
+
 export function normalizeText(value: string): string {
   return value
     .replace(/[٠-٩]/g, (digit) => String(arabicDigits.indexOf(digit)))
@@ -114,7 +125,14 @@ export function createExtractors(fields: CompiledFields) {
         ? { amount, currency: currency.toUpperCase() }
         : undefined;
     },
-    extractMerchant: (text: string) => value(text, 'merchant'),
+    extractMerchant: (text: string) => {
+      for (const pattern of fields.merchant ?? []) {
+        const values = [...text.matchAll(new RegExp(pattern.source, pattern.flags + 'g'))]
+          .map((match) => match.groups?.value?.trim())
+          .filter((name) => name !== undefined && name !== '');
+        if (values.length) return new Set(values).size === 1 ? values[0] : undefined;
+      }
+    },
     isCashback: (text: string) => (fields.cashback ?? []).some((p) => p.test(text)),
   };
 }
