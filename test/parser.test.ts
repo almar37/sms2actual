@@ -170,3 +170,23 @@ describe('Al Rajhi compact credit-card payment receipts', () => {
       expect(result.transaction.cardPaymentReceived).toBeUndefined();
   });
 });
+
+describe('Arabic merchant field boundaries', () => {
+  it('keeps the amount label out of the Jahez merchant', () => {
+    const result = parseSms(
+      'شراء عبر نقاط البيع \nبطاقة:8077 ;فيزا\nلدى:MYSR*Jahe\nمبلغ:77.5 SAR\nرصيد:20020.88 SAR\n؜7/11/26 22:09',
+      '2026-11-07T19:09:21.169Z',
+      banks,
+      'AlRajhiBank',
+      parsing,
+    );
+    expect(result).toMatchObject({
+      type: 'transaction',
+      transaction: {
+        payee: 'MYSR*Jahe',
+        amountCents: -7750,
+        accountAlias: '8077',
+      },
+    });
+  });
+});

@@ -99,7 +99,7 @@ shared:
       - source: (?:account|acct|a\/c|حساب|الحساب|بطاقة|card)[^\d٠-٩]{0,12}(?:[*xX-]*)(?<value>[\d٠-٩]{3,6})
         flags: iu
     merchant:
-      - source: (?:merchant|\bat\b|entity|لدى|متجر|الجهة)\s*[:：]?\s*(?<value>[^,;]+?)(?=\s+(?:on|date|total\s+amount|amount|SAR|SR|for\s+(?:SAR|SR)|(?:available|current)\s+balance|balance|country|fees?\b|رصيد|في|بتاريخ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)
+      - source: (?:merchant|\bat\b|entity|لدى|متجر|الجهة)\s*[:：]?\s*(?<value>[^,;]+?)(?=\s+(?:on|date|total\s+amount|amount|SAR|SR|for\s+(?:SAR|SR)|(?:available|current)\s+balance|balance|country|fees?\b|رصيد|في|بتاريخ|مبلغ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)
         flags: iu
     date:
       - source: (?<value>20\d\d[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)
