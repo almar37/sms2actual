@@ -5,6 +5,7 @@ import { EventStore } from '../src/db.js';
 import { PARSER_REVISION } from '../src/parser.js';
 import { Processor } from '../src/processor.js';
 import type { ActualAdapter, Enricher, ResolvedConfig } from '../src/types.js';
+import { sevenGramMessage, sevenGramReceivedAt } from './fixtures/alrajhi-compact-pos.js';
 
 const stores: EventStore[] = [];
 afterEach(() => {
@@ -106,6 +107,54 @@ const cardPaymentToBillerCode = 'SAB card payment From: 5202 To: 404 Amount: SAR
 const cardPaymentIbanEndingInBillerCode =
   'SAB card payment From: 5202 IBAN: SA0000000000000404 Amount: SAR 100.00';
 const receivedAt = '2026-08-22T10:10:30+03:00';
+
+describe('retained compact Al Rajhi POS messages', () => {
+  it('retries the Seven Gram review after the parser upgrade and imports it once into its mapped account', async () => {
+    const { store, processor, imported } = setup({
+      accounts: [
+        {
+          key: 'mada',
+          id: 'mada-id',
+          name: 'Mada',
+          match: { bank: 'alrajhi', accountSuffixes: ['2271'] },
+        },
+      ],
+    });
+    const { id } = store.enqueue({
+      eventId: 'seven-gram-pos',
+      sender: 'AlRajhiBank',
+      message: sevenGramMessage,
+      receivedAt: sevenGramReceivedAt,
+    });
+    store.update(id, 'needs_review', {
+      parserRevision: 16,
+      parserReason: 'malformed_notification',
+    });
+    expect(store.replayParserRevision(PARSER_REVISION)).toBe(1);
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({
+      status: 'imported',
+      parser_revision: PARSER_REVISION,
+      actual_transaction_id: 'actual-id',
+    });
+    expect(imported).toEqual([
+      {
+        account: 'mada-id',
+        transactions: [
+          expect.objectContaining({
+            amount: -1200,
+            payee_name: 'Seven Gram',
+            imported_payee: 'Seven Gram',
+            date: '2026-11-10',
+          }),
+        ],
+      },
+    ]);
+    expect(store.replayParserRevision(PARSER_REVISION)).toBe(0);
+    await processor.tick();
+    expect(imported).toHaveLength(1);
+  });
+});
 
 describe('credit-card repayment funding defaults', () => {
   const receipt = {

@@ -286,8 +286,8 @@ templates:
       principal:
         - source: '^شراء\s+[إا]نترنت\s+بـ?\s*(?:SAR|SR|ر\.?س\.?)\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|\\n|$)'
           flags: iu
-      accountAlias:
-        - source: '(?:^|\s|\\n)عبر\s*[:：]?\s*[*xX-]*(?<value>\d{3,6})(?!\d)'
+      accountAlias: &alrajhiCompactAccount
+        - source: '(?:^|\s|\\n)عبر\s*[:：]?\s*[*xX-]*(?<value>\d{3,6})(?=\s|[;؛]|$)'
           flags: iu
       merchant:
         - &labelledMerchant
@@ -315,6 +315,20 @@ templates:
         - source: '(?:^|\s|\\n)(?:الرصيد|رصيد)\s*[:：]\s*(?:SAR|SR|ر\.?س\.?)?\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|\\n|$)'
           flags: iu
     required: [principal, accountAlias]
+  - id: alrajhi-compact-pos-purchase
+    match:
+      - source: '^شراء\s+POS(?=\s|$)'
+        flags: iu
+    kind: purchase
+    fields:
+      accountAlias: *alrajhiCompactAccount
+      principal:
+        - source: '(?:^|\s)بـ?\s*[:：]?\s*(?<value>\d+(?:\.\d{1,2})?)\s*(?:SAR|SR|ر\.?س\.?)(?=\s|$)'
+          flags: iu
+        - source: '(?:^|\s)بـ?\s*[:：]?\s*(?:SAR|SR|ر\.?س\.?)\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|$)'
+          flags: iu
+      merchant: [*labelledMerchant]
+    required: [principal, accountAlias, merchant, date]
   - id: alrajhi-card-purchase
     match:
       - source: '^(?:POS(?: Purchase)?|(?:Online|Internet|Card|E-?commerce) Purchase|Purchase|شراء عبر نقاط البيع|شراء عبر الإنترنت)(?=\s|$)'

@@ -24,4 +24,6 @@ export function merchantReviewReason(value: string): string | undefined {
     return 'Contains a transaction date or time';
   if (/^(?:amount|balance|رصيد|الرصيد|مبلغ|المبلغ)\s*[:：]/iu.test(value))
     return 'Contains a transaction field';
+  if (/(?:^|\s)(?:مبلغ|المبلغ|رصيد|الرصيد|amount|balance)(?:\s+\d|$)/iu.test(key))
+    return 'Contains a transaction amount or balance';
 }

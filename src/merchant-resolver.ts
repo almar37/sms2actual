@@ -10,6 +10,7 @@ import { resolveAccount } from './routing.js';
 import { currentBudgetDate } from './budget-date.js';
 import { stableId } from './transaction-id.js';
 import { merchantKey, merchantReviewReason } from './merchant-identity.js';
+import { recheckMerchants } from './merchant-recheck.js';
 
 export { merchantKey } from './merchant-identity.js';
 
@@ -29,6 +30,7 @@ export class MerchantResolver {
     const mapping = this.store.mapping(accountId, merchantKey(merchant));
     return mapping &&
       mapping.source !== 'ai' &&
+      !mapping.review_reason &&
       (!this.categoriesLoaded || this.activeCategoryIds.has(mapping.category_id))
       ? mapping
       : undefined;
@@ -62,6 +64,7 @@ export class MerchantResolver {
   }
 
   private async performRefresh() {
+    recheckMerchants(this.store, this.config);
     await this.actual.sync();
     const categories = await this.actual.categories();
     this.activeCategoryIds = new Set(
@@ -92,7 +95,12 @@ export class MerchantResolver {
       transaction.isSplit
     )
       return undefined;
-    const description = transaction.importedPayee || transaction.payeeName;
+    const originalDescription = transaction.importedPayee || transaction.payeeName;
+    const repair = originalDescription
+      ? this.store.merchantRepair(transaction.accountId, merchantKey(originalDescription))
+      : undefined;
+    if (repair && !repair.merchant_key) return undefined;
+    const description = repair?.merchant ?? originalDescription;
     if (!description || merchantReviewReason(description)) return undefined;
     const serviceImport =
       transaction.importedId?.startsWith('sms:') || transaction.importedId?.startsWith('sms-edit:');
@@ -102,7 +110,7 @@ export class MerchantResolver {
       // Missing baselines (for example after a legacy reset) cannot establish consent.
       if (
         !baseline ||
-        (baseline.payee === (transaction.payeeName || description) &&
+        (baseline.payee === (transaction.payeeName || originalDescription) &&
           baseline.category_id === transaction.categoryId)
       )
         return undefined;
@@ -111,7 +119,10 @@ export class MerchantResolver {
       actualTransactionId: transaction.id,
       accountId: transaction.accountId,
       merchantKey: merchantKey(description),
-      payee: transaction.payeeName || description,
+      payee:
+        transaction.payeeName && !merchantReviewReason(transaction.payeeName)
+          ? transaction.payeeName
+          : description,
       categoryId: transaction.categoryId,
       transactionDate: transaction.date,
       corrected: serviceImport,

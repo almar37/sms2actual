@@ -563,10 +563,18 @@ export function registerConsole(
     ).map((mapping) => ({
       ...mapping,
       reviewReason:
+        mapping.review_reason ??
         merchantReviewReason(mapping.merchant_key) ??
         (mapping.source === 'ai' ? 'AI suggestion — confirm before reuse' : undefined),
     })),
   }));
+  app.post('/api/console/merchants/recheck', async (_req, reply) => {
+    if (processor.isBusy())
+      return reply
+        .code(409)
+        .send({ error: 'A message is being processed. Try the recheck again in a moment.' });
+    return processor.recheckMerchants();
+  });
   app.put('/api/console/merchants', async (req, reply) => {
     const body = z
       .object({

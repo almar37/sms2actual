@@ -44,13 +44,27 @@
       busy = false;
     }
   }
+  async function recheck() {
+    busy = true;
+    try {
+      const result = await api('/api/console/merchants/recheck', {}, 'POST');
+      await load();
+      notify(
+        `Checked ${result.checked} Al Rajhi messages: ${result.repaired} merchant keys repaired, ${result.needsReview} need review, ${result.unavailable} lack original messages.`,
+      );
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      busy = false;
+    }
+  }
   function edit(m?: any) {
     form = m
       ? {
           accountId: m.account_id,
           merchant: m.merchant_key,
           payee: m.payee,
-          categoryId: m.category_id,
+          categoryId: m.review_reason ? '' : m.category_id,
           existing: true,
         }
       : {
@@ -72,7 +86,14 @@
     <h1>Your merchants<span class="green">.</span></h1>
     <p>Every remembered merchant is one less thing to categorize.</p>
   </div>
-  <button class="primary" onclick={() => edit()}><Icon name="plus" size={17} />Add merchant</button>
+  <div class="button-row">
+    <button disabled={busy} onclick={recheck}
+      >{busy ? 'Rechecking…' : 'Recheck Al Rajhi merchants'}</button
+    >
+    <button class="primary" onclick={() => edit()}
+      ><Icon name="plus" size={17} />Add merchant</button
+    >
+  </div>
 </div>
 <div class="info-box subtle">
   <Icon name="ai" size={20} /><span

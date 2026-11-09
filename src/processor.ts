@@ -17,6 +17,7 @@ import { resolveAccount, resolveTransferTarget } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
 import { transactionNotes } from './transaction-notes.js';
 import { merchantReviewReason } from './merchant-identity.js';
+import { recheckMerchants } from './merchant-recheck.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 // Historical imports used the parsed SMS suffix. Keep that stable whenever a
@@ -56,6 +57,9 @@ export class Processor {
   }
   refreshMappings() {
     return this.merchantResolver.refresh();
+  }
+  recheckMerchants() {
+    return recheckMerchants(this.store, this.config);
   }
   start() {
     this.store.recover();

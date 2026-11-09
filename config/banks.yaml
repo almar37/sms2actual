@@ -9,6 +9,7 @@ banks:
     templates:
       - alrajhi-own-transfer
       - alrajhi-online-purchase
+      - alrajhi-compact-pos-purchase
       - alrajhi-card-payment-received
       - alrajhi-card-purchase
       - alrajhi-card-refund

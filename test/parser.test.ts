@@ -2,6 +2,7 @@ import { banks, parsing } from './fixtures/banks.js';
 import { describe, expect, it } from 'vitest';
 import { normalizeText, PARSER_REVISION, parseSms } from '../src/parser.js';
 import { smsFixtures } from './fixtures/sms.js';
+import { sevenGramMessage, sevenGramReceivedAt } from './fixtures/alrajhi-compact-pos.js';
 
 describe('SMS parser fixture corpus', () => {
   it.each(smsFixtures)('$provenance: $name', ({ sender, message, receivedAt, expected }) => {
@@ -9,7 +10,7 @@ describe('SMS parser fixture corpus', () => {
   });
 
   it('tracks the parser release represented by the corpus', () => {
-    expect(PARSER_REVISION).toBe(16);
+    expect(PARSER_REVISION).toBe(17);
   });
 });
 
@@ -205,6 +206,76 @@ describe('Al Rajhi merchant integrity', () => {
         type: 'transaction',
         transaction: { kind: 'refund', payee: 'Coffee, Books & Co.', amountCents: 2000 },
       });
+  });
+});
+
+describe('Al Rajhi compact Google Pay POS purchases', () => {
+  const parse = (sms: string) => parseSms(sms, sevenGramReceivedAt, banks, 'AlRajhiBank', parsing);
+
+  it.each(['\n', '\\n', '\r\n', '\\r\\n', ' '])(
+    'captures the reported Seven Gram message with %j separators',
+    (separator) => {
+      expect(parse(sevenGramMessage.replaceAll('\n', separator))).toMatchObject({
+        type: 'transaction',
+        transaction: {
+          bank: 'alrajhi',
+          kind: 'purchase',
+          accountAlias: '2271',
+          amountCents: -1200,
+          principalCents: -1200,
+          feeCents: 0,
+          payee: 'Seven Gram',
+          occurredAt: '2026-11-10T23:17:00.000+03:00',
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['Arabic digits', sevenGramMessage.replace('2271', '٢٢٧١').replace('12 SR', '١٢ SR'), -1200],
+    ['decimal amount', sevenGramMessage.replace('12 SR', '١٢٫٥٠ SR'), -1250],
+    ['currency before amount', sevenGramMessage.replace('12 SR', 'SAR 12.50'), -1250],
+    [
+      'case and field punctuation',
+      sevenGramMessage.replace('PoS', 'POS').replace('عبر2271;', 'عبر:***2271؛'),
+      -1200,
+    ],
+  ] as const)(
+    'accepts %s without including the payment method in the merchant',
+    (_name, sms, amountCents) => {
+      expect(parse(sms)).toMatchObject({
+        type: 'transaction',
+        transaction: {
+          accountAlias: '2271',
+          payee: 'Seven Gram',
+          amountCents,
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['missing amount', sevenGramMessage.replace('بـ12 SR', '')],
+    ['missing currency', sevenGramMessage.replace('12 SR', '12')],
+    ['foreign currency', sevenGramMessage.replace('12 SR', '12 USD')],
+    ['invalid amount', sevenGramMessage.replace('12 SR', '12.345 SR')],
+    ['negative amount', sevenGramMessage.replace('12 SR', '-12 SR')],
+    ['missing card', sevenGramMessage.replace('2271', '')],
+    ['overlong card', sevenGramMessage.replace('2271', '227112345')],
+    ['malformed card', sevenGramMessage.replace('2271', '2271abc')],
+    ['missing merchant', sevenGramMessage.replace('لـSeven Gram', '')],
+    ['empty merchant', sevenGramMessage.replace('Seven Gram', '')],
+    ['missing date', sevenGramMessage.replace('26/11/10 23:17', '')],
+    ['invalid date', sevenGramMessage.replace('26/11/10 23:17', '26/13/13 23:17')],
+  ])('retains %s for review', (_name, sms) => {
+    expect(parse(sms)).toEqual({ type: 'needs_review', reason: 'malformed_notification' });
+  });
+
+  it('keeps the format specific to the selected bank', () => {
+    expect(parseSms(sevenGramMessage, sevenGramReceivedAt, banks, 'SAB', parsing)).toEqual({
+      type: 'needs_review',
+      reason: 'malformed_notification',
+    });
   });
 });
 

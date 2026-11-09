@@ -72,6 +72,12 @@ A category is applied only when confidence meets `ENRICHMENT_MIN_CONFIDENCE`, wh
 
 Al Rajhi POS, online-purchase, and refund templates preserve merchant punctuation, digits, and line boundaries. Actual newlines, CRLF, and escaped line breaks are parsed consistently. Missing, conflicting, generic, or date-contaminated purchase/refund merchants go to review rather than becoming reusable mappings. Import IDs and previously imported transactions are preserved.
 
+Compact Al Rajhi Mada/Google Pay notifications headed `شراء PoS` are supported, including the `عبر` card suffix, `بـ12 SR` amount, `لـ` merchant, and transaction date. Routing uses the suffix shown after `عبر`; configure it on the intended existing account in **Accounts & cards**. Parser revision 17 retries retained review messages from the previous version after startup. A missing or malformed required field still holds the notification for review, with any recognized fields prefilled.
+
+Existing Al Rajhi merchant keys are rechecked against retained original SMS whenever merchant history refreshes, including after startup. Use **Your merchants → Recheck Al Rajhi merchants** to run the same cleanup immediately. Successful reparsing removes dates, amount fields, and other extraction errors from the saved keys; duplicate keys for the same merchant are grouped. Explicit aliases are retained when unambiguous. Conflicting saved names or categories require confirmation in the merchant editor before reuse. Missing or unsupported original messages stay flagged rather than being guessed.
+
+This cleanup updates merchant mappings only: it does not reimport transactions or change existing transactions in Actual. Original SMS, stored transaction details, and Actual IDs remain intact so older import links still resolve. Corrections are recorded in each affected message's history and remembered across Actual history refreshes and SMS-log resets, preventing stale imported descriptions from recreating the old keys. To change an existing Actual transaction, use **SMS inbox → Save to Actual**.
+
 ### What stays on your server
 
 The SQLite database keeps raw SMS, any supplied location, status changes, mapping decisions, enrichment attempts, and import outcomes for authenticated review until you explicitly clear SMS and logs in Settings. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.

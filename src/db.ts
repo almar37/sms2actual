@@ -8,6 +8,7 @@ import type {
   SmsInput,
 } from './types.js';
 import { normalizeText, type ParserReason } from './parser.js';
+import { merchantKey, merchantReviewReason } from './merchant-identity.js';
 
 export interface StoredEvent {
   id: string;
@@ -34,6 +35,15 @@ export interface MerchantMapping {
   source: 'actual' | 'local' | 'ai';
   source_ref: string | null;
   decision_at: string;
+  updated_at: string;
+  review_reason?: string | null;
+}
+export interface MerchantKeyRepair {
+  account_id: string;
+  original_key: string;
+  merchant_key: string | null;
+  merchant: string | null;
+  reason: string | null;
   updated_at: string;
 }
 export class InboxCheckpointConflict extends Error {
@@ -65,6 +75,7 @@ export class EventStore {
     CREATE TABLE IF NOT EXISTS actual_mapping_observations(actual_transaction_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,transaction_date TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS local_mapping_observations(source_ref TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS merchant_import_baselines(imported_id TEXT PRIMARY KEY,payee TEXT NOT NULL,category_id TEXT);
+    CREATE TABLE IF NOT EXISTS merchant_key_repairs(account_id TEXT NOT NULL,original_key TEXT NOT NULL,merchant_key TEXT,merchant TEXT,reason TEXT,evidence TEXT NOT NULL,original_mappings TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(account_id,original_key));
     CREATE TABLE IF NOT EXISTS inbox_sync_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),cursor_date INTEGER NOT NULL,cursor_id INTEGER NOT NULL,updated_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS event_queue ON events(status,next_attempt_at);
     CREATE INDEX IF NOT EXISTS event_history_event ON event_history(event_id,id);
@@ -94,6 +105,11 @@ export class EventStore {
           UPDATE merchant_mappings SET source='ai' WHERE source='local'
           AND (source_ref IS NULL OR (source_ref NOT LIKE 'console:%' AND source_ref NOT LIKE 'console-review:%'));`);
       })();
+    const merchantColumns = this.db.prepare('PRAGMA table_info(merchant_mappings)').all() as {
+      name: string;
+    }[];
+    if (!merchantColumns.some((column) => column.name === 'review_reason'))
+      this.db.exec('ALTER TABLE merchant_mappings ADD COLUMN review_reason TEXT');
     this.backfillAudit();
   }
   enqueue(input: SmsInput): { id: string; duplicate: boolean } {
@@ -463,8 +479,8 @@ export class EventStore {
     const now = new Date().toISOString();
     this.db
       .prepare(
-        `INSERT INTO merchant_mappings(account_id,merchant_key,payee,category_id,source,source_ref,decision_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
-         ON CONFLICT(account_id,merchant_key) DO UPDATE SET payee=excluded.payee,category_id=excluded.category_id,source=excluded.source,source_ref=excluded.source_ref,decision_at=excluded.decision_at,updated_at=excluded.updated_at
+        `INSERT INTO merchant_mappings(account_id,merchant_key,payee,category_id,source,source_ref,decision_at,updated_at,review_reason) VALUES(?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(account_id,merchant_key) DO UPDATE SET payee=excluded.payee,category_id=excluded.category_id,source=excluded.source,source_ref=excluded.source_ref,decision_at=excluded.decision_at,updated_at=excluded.updated_at,review_reason=excluded.review_reason
          WHERE (CASE excluded.source WHEN 'local' THEN 2 WHEN 'actual' THEN 1 ELSE 0 END) >
            (CASE merchant_mappings.source WHEN 'local' THEN 2 WHEN 'actual' THEN 1 ELSE 0 END)
            OR (excluded.source=merchant_mappings.source AND excluded.decision_at>=merchant_mappings.decision_at)`,
@@ -478,11 +494,14 @@ export class EventStore {
         mapping.source_ref,
         mapping.decision_at,
         now,
+        mapping.review_reason ?? null,
       );
   }
   putLocalMapping(
     mapping: Omit<MerchantMapping, 'updated_at' | 'source'> & { source?: 'local' | 'ai' },
   ) {
+    const repair = this.merchantRepair(mapping.account_id, mapping.merchant_key);
+    if (repair?.merchant_key) mapping = { ...mapping, merchant_key: repair.merchant_key };
     const now = new Date().toISOString();
     this.db.transaction(() => {
       this.db
@@ -500,7 +519,14 @@ export class EventStore {
           now,
           mapping.source ?? 'local',
         );
-      this.putMapping({ ...mapping, source: mapping.source ?? 'local' });
+      this.putMapping({
+        ...mapping,
+        source: mapping.source ?? 'local',
+        review_reason:
+          mapping.source === 'ai'
+            ? this.mapping(mapping.account_id, mapping.merchant_key)?.review_reason
+            : null,
+      });
     })();
   }
   replaceActualMappings(
@@ -552,7 +578,18 @@ export class EventStore {
           now,
         );
       }
-      this.db.prepare('DELETE FROM merchant_mappings').run();
+      this.rebuildMerchantMappings();
+    })();
+  }
+  merchantRepair(accountId: string, originalKey: string): MerchantKeyRepair | undefined {
+    return this.db
+      .prepare(
+        'SELECT account_id,original_key,merchant_key,merchant,reason,updated_at FROM merchant_key_repairs WHERE account_id=? AND original_key=?',
+      )
+      .get(accountId, originalKey) as MerchantKeyRepair | undefined;
+  }
+  rebuildMerchantMappings() {
+    this.db.transaction(() => {
       const candidates = this.db
         .prepare(
           `SELECT account_id,merchant_key,payee,category_id,source,source_ref,decision_at FROM local_mapping_observations
@@ -561,7 +598,87 @@ export class EventStore {
            ORDER BY decision_at,source_ref`,
         )
         .all() as Omit<MerchantMapping, 'updated_at'>[];
-      for (const candidate of candidates) this.putMapping(candidate);
+      const groups = new Map<string, Omit<MerchantMapping, 'updated_at'>[]>();
+      const repairs = this.db
+        .prepare('SELECT * FROM merchant_key_repairs')
+        .all() as MerchantKeyRepair[];
+      const repairedKeys = new Map<string, string>();
+      const originalKeys = new Map(
+        repairs.map((repair) => [JSON.stringify([repair.account_id, repair.original_key]), repair]),
+      );
+      for (const repair of repairs) {
+        const key = JSON.stringify([repair.account_id, repair.merchant_key]);
+        if (repair.merchant_key && (repairedKeys.get(key) ?? '') < repair.updated_at)
+          repairedKeys.set(key, repair.updated_at);
+      }
+      for (let candidate of candidates) {
+        const repair = originalKeys.get(
+          JSON.stringify([candidate.account_id, candidate.merchant_key]),
+        );
+        if (repair?.merchant_key)
+          candidate = {
+            ...candidate,
+            merchant_key: repair.merchant_key,
+            payee: merchantReviewReason(candidate.payee) ? repair.merchant! : candidate.payee,
+          };
+        else if (
+          repair &&
+          !(
+            candidate.source === 'local' &&
+            candidate.source_ref === `console:${candidate.account_id}:${candidate.merchant_key}` &&
+            candidate.decision_at > repair.updated_at
+          )
+        )
+          candidate = {
+            ...candidate,
+            source: 'ai',
+            review_reason: repair.reason ?? 'Original messages need review',
+          };
+        const key = JSON.stringify([candidate.account_id, candidate.merchant_key]);
+        const group = groups.get(key) ?? [];
+        group.push(candidate);
+        groups.set(key, group);
+      }
+      this.db.prepare('DELETE FROM merchant_mappings').run();
+      const priority = (source: MerchantMapping['source']) =>
+        source === 'local' ? 2 : source === 'actual' ? 1 : 0;
+      for (const [key, group] of groups) {
+        group.sort(
+          (a, b) =>
+            priority(a.source) - priority(b.source) ||
+            a.decision_at.localeCompare(b.decision_at) ||
+            (a.source_ref ?? '').localeCompare(b.source_ref ?? ''),
+        );
+        const latest = group.at(-1)!;
+        const explicit = group.findLast(
+          (candidate) =>
+            candidate.source === 'local' &&
+            (candidate.source_ref === `console:${candidate.account_id}:${candidate.merchant_key}` ||
+              (candidate.source_ref?.startsWith('console-review:') &&
+                candidate.decision_at > (repairedKeys.get(key) ?? ''))),
+        );
+        const choices = group.filter((candidate) => candidate.source === latest.source);
+        const conflict =
+          repairedKeys.has(key) &&
+          !explicit &&
+          new Set(
+            choices.map((candidate) =>
+              JSON.stringify([merchantKey(candidate.payee), candidate.category_id]),
+            ),
+          ).size > 1;
+        this.putMapping(
+          explicit ?? {
+            ...latest,
+            ...(conflict
+              ? {
+                  source: 'ai',
+                  review_reason:
+                    'Conflicting saved merchant names or categories — confirm before reuse',
+                }
+              : {}),
+          },
+        );
+      }
     })();
   }
   recordMerchantImport(importedId: string, payee: string, categoryId?: string) {

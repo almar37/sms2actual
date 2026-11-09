@@ -15,6 +15,7 @@ import { ConfigurableEnricher } from '../src/provider-enricher.js';
 import { generateTaskerProject } from '../src/tasker-export.js';
 import type { ActualAdapter, HistoricalTransaction, ResolvedConfig } from '../src/types.js';
 import { banks, parsing } from './fixtures/banks.js';
+import { sevenGramMessage, sevenGramReceivedAt } from './fixtures/alrajhi-compact-pos.js';
 
 const stores: EventStore[] = [];
 afterEach(() => {
@@ -118,6 +119,7 @@ async function server(signedIn = true, trustedOrigins: string[] = [], onboarding
       tick: async () => {},
       setMinConfidence: () => {},
       isBusy: () => f.processor.isBusy(),
+      recheckMerchants: () => f.processor.recheckMerchants(),
       withActualAccess: <T>(work: () => Promise<T>) => f.processor.withActualAccess(work),
     } as unknown as Processor,
     ready: () => true,
@@ -1145,6 +1147,82 @@ describe('console access and APIs', () => {
     expect(settings.ai().apiKey).toBe('sensitive-test-key');
     await app.close();
   });
+  it('rechecks retained Al Rajhi merchant keys without reimporting or editing Actual', async () => {
+    const { app, headers, store, config, actual, imports, processor } = await server();
+    config.accounts.push({
+      id: 'alrajhi',
+      key: 'alrajhi',
+      name: 'Al Rajhi',
+      match: { bank: 'alrajhi', accountSuffixes: ['4187'] },
+    });
+    const { id } = store.enqueue({
+      sender: 'AlRajhiBank',
+      receivedAt: now,
+      message: 'شراء إنترنت بـSR 42.35\nعبر4187;فيزا\nلـAmazon sa\n8/11/26 00:31',
+    });
+    store.update(id, 'imported', {
+      parsed: {
+        bank: 'alrajhi',
+        kind: 'purchase',
+        accountAlias: '4187',
+        amountCents: -4235,
+        feeCents: 0,
+        payee: 'Amazon sa 8/11/26 00:31',
+        occurredAt: now,
+        note: 'Old import',
+      },
+      actualTransactionId: 'existing-id',
+    });
+    store.putLocalMapping({
+      account_id: 'alrajhi',
+      merchant_key: 'amazon sa 8 11 26 00 31',
+      payee: 'Amazon SA',
+      category_id: 'food',
+      source: 'ai',
+      source_ref: id,
+      decision_at: now,
+    });
+    const sync = vi.spyOn(actual, 'sync');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/console/merchants/recheck',
+      headers,
+      payload: {},
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json()).toMatchObject({ checked: 1, repaired: 1 });
+    const list = await app.inject({ url: '/api/console/merchants', headers });
+    expect(list.json().merchants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ merchant_key: 'amazon sa', source: 'ai' }),
+      ]),
+    );
+    expect(store.get(id)?.actual_transaction_id).toBe('existing-id');
+    expect(imports).not.toHaveBeenCalled();
+    expect(sync).not.toHaveBeenCalled();
+    vi.spyOn(processor, 'isBusy').mockReturnValue(true);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/merchants/recheck',
+          headers,
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/api/console/merchants/recheck',
+          headers: { origin },
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(401);
+    await app.close();
+  });
 });
 
 describe('reference templates and providers', () => {
@@ -1393,6 +1471,41 @@ describe('console financial safeguards', () => {
     expect(imports).not.toHaveBeenCalled();
     await app.close();
   });
+  it.each([
+    ['2271', 'credit'],
+    ['6599', null],
+  ] as const)(
+    'prefills Seven Gram and selects the account only when suffix %s matches',
+    async (configuredSuffix, accountId) => {
+      const { app, headers, store, config, imports } = await server();
+      config.accounts[1]!.match = { bank: 'alrajhi', accountSuffixes: [configuredSuffix] };
+      const { id } = store.enqueue({
+        sender: 'AlRajhiBank',
+        message: sevenGramMessage,
+        receivedAt: sevenGramReceivedAt,
+      });
+      store.update(id, 'needs_review', {
+        parserReason: 'malformed_notification',
+        parserRevision: 16,
+      });
+      const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+      expect(detail.statusCode, detail.body).toBe(200);
+      expect(detail.json()).toMatchObject({
+        status: 'needs_review',
+        sourceAccountId: accountId,
+        reviewDraft: {
+          kind: 'purchase',
+          accountAlias: '2271',
+          principalCents: -1200,
+          payee: 'Seven Gram',
+          occurredAt: '2026-11-10T23:17:00.000+03:00',
+        },
+      });
+      expect(store.get(id)?.parsed).toBeNull();
+      expect(imports).not.toHaveBeenCalled();
+      await app.close();
+    },
+  );
   it('leaves an ambiguous source account for the user to choose', async () => {
     const { app, headers, store } = await server();
     const { id } = store.enqueue({

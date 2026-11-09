@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractReviewDraft, parseSms } from '../src/parser.js';
 import { banks, parsing } from './fixtures/banks.js';
+import { sevenGramMessage, sevenGramReceivedAt } from './fixtures/alrajhi-compact-pos.js';
 
 const receivedAt = '2026-11-06T14:10:00+03:00';
 export const waterTransfer =
@@ -9,6 +10,27 @@ const draft = (message: string, sender = 'AlRajhiBank') =>
   extractReviewDraft(message, receivedAt, banks, sender, parsing);
 
 describe('review suggestions', () => {
+  it('prefills Seven Gram details even if the notification remains in review', () => {
+    expect(
+      extractReviewDraft(sevenGramMessage, sevenGramReceivedAt, banks, 'AlRajhiBank', parsing),
+    ).toMatchObject({
+      bank: 'alrajhi',
+      kind: 'purchase',
+      accountAlias: '2271',
+      principalCents: -1200,
+      payee: 'Seven Gram',
+      occurredAt: '2026-11-10T23:17:00.000+03:00',
+    });
+    const partial = extractReviewDraft(
+      sevenGramMessage.replace('بـ12 SR', ''),
+      sevenGramReceivedAt,
+      banks,
+      'AlRajhiBank',
+      parsing,
+    );
+    expect(partial).toMatchObject({ accountAlias: '2271', payee: 'Seven Gram' });
+    expect(partial.principalCents).toBeUndefined();
+  });
   it('extracts the compact Arabic transfer without authorizing automatic import', () => {
     expect(parseSms(waterTransfer, receivedAt, banks, 'AlRajhiBank', parsing)).toEqual({
       type: 'needs_review',
