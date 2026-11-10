@@ -116,7 +116,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
       source: 'ai',
       review_reason: expect.stringContaining('Conflicting'),
     });
-    expect(f.resolver.lookup('card-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(f.resolver.lookup('MYSR*Jahe')).toBeUndefined();
     expect(['amazon', 'jahe-77', 'jahe-160'].map((id) => f.store.get(id))).toEqual(before);
     const auditCount = f.store.eventHistory('amazon').length;
     await f.resolver.refresh();
@@ -135,7 +135,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
     const f = fixture();
     f.add('amazon', 'Amazon SA', 'Amazon sa 8/11/26 00:31', 'food', 'local');
     await f.resolver.refresh();
-    expect(f.resolver.lookup('card-id', 'Amazon sa')).toMatchObject({
+    expect(f.resolver.lookup('Amazon sa')).toMatchObject({
       payee: 'Amazon SA',
       source: 'local',
     });
@@ -148,7 +148,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
       decision_at: new Date(Date.now() + 1000).toISOString(),
     });
     await f.resolver.refresh();
-    expect(f.resolver.lookup('card-id', 'Amazon sa')).toMatchObject({
+    expect(f.resolver.lookup('Amazon sa')).toMatchObject({
       payee: 'Amazon Saudi',
       category_id: 'eating',
     });
@@ -160,7 +160,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
     f.add('truncated', 'SHOP COUNTRY MARKET', 'SHOP', 'food', 'local');
     expect(recheckMerchants(f.store, config)).toMatchObject({ repaired: 1 });
     expect(f.store.mapping('card-id', 'shop')).toBeUndefined();
-    expect(f.resolver.lookup('card-id', 'SHOP COUNTRY MARKET')).toMatchObject({
+    expect(f.resolver.lookup('SHOP COUNTRY MARKET')).toMatchObject({
       payee: 'SHOP COUNTRY MARKET',
       source: 'local',
     });
@@ -171,7 +171,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
     f.add('one', 'MYSR*Jahe', 'MYSR*Jahe مبلغ:77.5 SAR', 'food', 'local');
     f.add('two', 'MYSR*Jahe', 'MYSR*Jahe مبلغ:160 SAR', 'eating', 'local', '160');
     recheckMerchants(f.store, config);
-    expect(f.resolver.lookup('card-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(f.resolver.lookup('MYSR*Jahe')).toBeUndefined();
     f.store.putLocalMapping({
       account_id: 'card-id',
       merchant_key: 'mysr jahe',
@@ -181,7 +181,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
       decision_at: new Date().toISOString(),
     });
     recheckMerchants(f.store, config);
-    expect(f.resolver.lookup('card-id', 'MYSR*Jahe')).toMatchObject({
+    expect(f.resolver.lookup('MYSR*Jahe')).toMatchObject({
       payee: 'Jahez',
       category_id: 'food',
       source: 'local',
@@ -198,7 +198,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
       merchant_key: null,
       reason: 'Original description matches multiple merchants',
     });
-    expect(f.resolver.lookup('card-id', 'Unknown merchant')).toBeUndefined();
+    expect(f.resolver.lookup('Unknown merchant')).toBeUndefined();
   });
 
   it('does not redirect a legitimate unchanged name when an old truncated key collides with it', () => {
@@ -207,7 +207,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
     f.add('unchanged', 'SHOP', 'SHOP', 'food', 'local');
     expect(recheckMerchants(f.store, config)).toMatchObject({ repaired: 0, needsReview: 1 });
     expect(f.store.merchantRepair('card-id', 'shop')?.merchant_key).toBeNull();
-    expect(f.resolver.lookup('card-id', 'SHOP')).toBeUndefined();
+    expect(f.resolver.lookup('SHOP')).toBeUndefined();
     expect(f.store.mapping('card-id', 'shop')?.review_reason).toContain('multiple');
   });
 
@@ -246,7 +246,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
       payee: 'Amazon SA',
       source: 'ai',
     });
-    expect(f.resolver.lookup('card-id', 'Amazon sa')).toBeUndefined();
+    expect(f.resolver.lookup('Amazon sa')).toBeUndefined();
   });
 
   it('uses remembered repairs when Actual history refreshes after SMS logs are cleared', async () => {
@@ -257,7 +257,7 @@ describe('rechecking retained Al Rajhi merchants', () => {
     f.transactions[0]!.categoryId = 'eating';
     await f.resolver.refresh();
     expect(f.store.mapping('card-id', 'amazon sa 8 11 26 00 31')).toBeUndefined();
-    expect(f.resolver.lookup('card-id', 'Amazon sa')).toMatchObject({
+    expect(f.resolver.lookup('Amazon sa')).toMatchObject({
       payee: 'Amazon SA',
       source: 'local',
     });

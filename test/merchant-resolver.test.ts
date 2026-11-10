@@ -62,12 +62,12 @@ describe('merchant history resolver', () => {
     await resolver.refresh();
 
     expect(merchantKey('sample books')).toBe('sample books');
-    expect(resolver.lookup('checking-id', 'sample books')).toMatchObject({
+    expect(resolver.lookup('sample books')).toMatchObject({
       payee: 'Sample Books',
       category_id: 'shopping',
       source: 'actual',
     });
-    expect(resolver.lookup('another-account', 'sample books')).toBeUndefined();
+    expect(resolver.lookup('sample books')?.payee).toBe('Sample Books');
   });
 
   it('makes a newly observed Actual category correction authoritative', async () => {
@@ -93,8 +93,8 @@ describe('merchant history resolver', () => {
     history[0]!.categoryId = 'shopping';
     await resolver.refresh();
 
-    expect(resolver.lookup('checking-id', 'Cafe')?.category_id).toBe('shopping');
-    expect(resolver.lookup('checking-id', 'Cafe')?.source).toBe('actual');
+    expect(resolver.lookup('Cafe')?.category_id).toBe('shopping');
+    expect(resolver.lookup('Cafe')?.source).toBe('actual');
   });
 
   it('ignores hidden categories', async () => {
@@ -108,7 +108,7 @@ describe('merchant history resolver', () => {
       },
     ]);
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'Hidden merchant')).toBeUndefined();
+    expect(resolver.lookup('Hidden merchant')).toBeUndefined();
   });
 
   it('retains AI suggestions for confirmation without reusing them', async () => {
@@ -120,9 +120,9 @@ describe('merchant history resolver', () => {
       'sms-1',
     );
     expect(store.mapping('checking-id', merchantKey('MYSR*Jahe'))?.source).toBe('ai');
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
   });
 
   it('keeps manual aliases ahead of newer AI and Actual observations', async () => {
@@ -152,14 +152,14 @@ describe('merchant history resolver', () => {
       'sms-1',
     );
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toMatchObject({
+    expect(resolver.lookup('MYSR*Jahe')).toMatchObject({
       payee: 'Jahez',
       category_id: 'food',
       source: 'local',
     });
     history[0]!.categoryId = 'food';
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')?.payee).toBe('Jahez');
+    expect(resolver.lookup('MYSR*Jahe')?.payee).toBe('Jahez');
   });
 
   it('learns only corrections to service imports, including payee-only corrections', async () => {
@@ -177,21 +177,21 @@ describe('merchant history resolver', () => {
     const { store, resolver } = setup(history);
     store.recordMerchantImport('sms:example', 'MYSR*Jahe', 'food');
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
     history[0]!.payeeName = 'Jahez';
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toMatchObject({
+    expect(resolver.lookup('MYSR*Jahe')).toMatchObject({
       payee: 'Jahez',
       source: 'actual',
       category_id: 'food',
     });
     history[0]!.categoryId = 'shopping';
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')?.category_id).toBe('shopping');
+    expect(resolver.lookup('MYSR*Jahe')?.category_id).toBe('shopping');
     history[0]!.payeeName = 'MYSR*Jahe';
     history[0]!.categoryId = 'food';
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
   });
 
   it('does not treat legacy imports without a baseline as confirmed history', async () => {
@@ -207,7 +207,7 @@ describe('merchant history resolver', () => {
       },
     ]);
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
   });
 
   it('reconstructs legacy import output without promoting its AI guess, then learns a correction', async () => {
@@ -245,7 +245,7 @@ describe('merchant history resolver', () => {
       categoryId: 'food',
     });
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+    expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
     history[0]!.payeeName = 'Jahez';
     history.push({
       id: 'recent-history',
@@ -256,7 +256,7 @@ describe('merchant history resolver', () => {
       categoryId: 'shopping',
     });
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toMatchObject({
+    expect(resolver.lookup('MYSR*Jahe')).toMatchObject({
       payee: 'Jahez',
       category_id: 'food',
       source: 'actual',
@@ -295,7 +295,7 @@ describe('merchant history resolver', () => {
         categoryId: 'food',
       });
       await resolver.refresh();
-      expect(resolver.lookup('checking-id', 'MYSR*Jahe')).toBeUndefined();
+      expect(resolver.lookup('MYSR*Jahe')).toBeUndefined();
     },
   );
 
@@ -322,7 +322,7 @@ describe('merchant history resolver', () => {
     await resolver.refresh();
     history[0]!.payeeName = 'Correct cafe';
     await resolver.refresh();
-    expect(resolver.lookup('checking-id', 'Cafe')?.payee).toBe('Correct cafe');
+    expect(resolver.lookup('Cafe')?.payee).toBe('Correct cafe');
   });
 
   it.each(['Unknown merchant', 'Amazon sa 5/11/26 21:34', '   '])(
@@ -347,9 +347,9 @@ describe('merchant history resolver', () => {
         source_ref: 'console:bad',
         decision_at: new Date().toISOString(),
       });
-      expect(resolver.lookup('checking-id', merchant)).toBeUndefined();
+      expect(resolver.lookup(merchant)).toBeUndefined();
       await resolver.refresh();
-      expect(resolver.lookup('checking-id', merchant)).toBeUndefined();
+      expect(resolver.lookup(merchant)).toBeUndefined();
     },
   );
 });

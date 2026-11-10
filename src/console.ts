@@ -33,6 +33,12 @@ import { currentBudgetDate } from './budget-date.js';
 import { actualConnectionSchema, type ActualConnection } from './actual-connection.js';
 import { readMessageActual, saveMessageActual, type MessageActualState } from './message-sync.js';
 import { transactionNotes } from './transaction-notes.js';
+import {
+  deleteMessageActual,
+  messageImportIds,
+  messageRevision,
+  planMessageDeletion,
+} from './message-delete.js';
 import { patternFromSelections, selectionFields } from './template-selection.js';
 
 export interface ConsoleOptions {
@@ -321,7 +327,10 @@ export function registerConsole(
       )
       .all(...params, (q.page - 1) * 50) as StoredEvent[];
     return {
-      events: rows.map(eventView),
+      events: rows.map((e) => ({
+        ...eventView(e),
+        deletionPending: Boolean(store.pendingDeletion(e.id)),
+      })),
       total,
       page: q.page,
       lastTaskerSync: options.settings.get('lastTaskerSync') ?? null,
@@ -401,6 +410,7 @@ export function registerConsole(
     }
     return {
       ...eventView(event),
+      deletionPending: Boolean(store.pendingDeletion(event.id)),
       reviewDraft,
       categoryNeedsAttention: actualState
         ? !actualState.form.categoryId &&
@@ -433,6 +443,79 @@ export function registerConsole(
       enrichmentAttempts: attempts,
     };
   });
+  app.get<{ Params: { id: string } }>('/api/console/events/:id/deletion', async (req, reply) => {
+    const event = store.get(req.params.id);
+    if (!event) return reply.code(404).send({ error: 'Message not found' });
+    if (event.status === 'processing')
+      return reply.code(409).send({ error: 'This message is being processed. Try again shortly.' });
+    try {
+      const read = () => planMessageDeletion(options.actual, store, options.config, event);
+      const plan =
+        event.parsed || event.actual_transaction_id || store.pendingDeletion(event.id)
+          ? await processor.withActualAccess(read)
+          : await read();
+      return { ...plan, canDeleteActual: Boolean(options.actual.deleteTransactions), error: null };
+    } catch (error) {
+      return {
+        eventRevision: messageRevision(event),
+        transactions: [],
+        canDeleteActual: false,
+        error: error instanceof Error ? error.message : 'Could not check linked Actual entries',
+      };
+    }
+  });
+  app.delete<{ Params: { id: string } }>('/api/console/events/:id', async (req, reply) => {
+    const body = z
+      .object({
+        confirmation: z.literal('DELETE'),
+        deleteActual: z.boolean(),
+        eventRevision: z.string().min(1),
+        actualRevision: z.string().optional(),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success)
+      return reply
+        .code(400)
+        .send({ error: 'Confirm deletion and choose whether to keep the Actual transaction' });
+    const event = store.get(req.params.id);
+    if (!event) return reply.code(404).send({ error: 'Message not found' });
+    if (event.status === 'processing' || messageRevision(event) !== body.data.eventRevision)
+      return reply.code(409).send({
+        error: 'This message changed or is being processed. Refresh the deletion confirmation.',
+      });
+    if (!body.data.deleteActual) {
+      if (processor.isBusy())
+        return reply
+          .code(409)
+          .send({ error: 'A message or Actual operation is in progress. Try again shortly.' });
+      store.deleteMessage(event.id, undefined, [], messageImportIds(options.config, event));
+      return { ok: true, deletedActual: false };
+    }
+    if (!body.data.actualRevision)
+      return reply
+        .code(400)
+        .send({ error: 'Load the linked Actual entries before confirming their deletion' });
+    try {
+      const deleted = await processor.withActualAccess(() =>
+        deleteMessageActual(
+          options.actual,
+          store,
+          options.config,
+          event,
+          body.data.actualRevision!,
+        ),
+      );
+      return { ok: true, deletedActual: true, deletedTransactions: deleted };
+    } catch (error) {
+      return reply.code(409).send({
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not delete linked Actual entries. The SMS was kept.',
+      });
+    }
+  });
   const action = z
     .object({
       kind: actionSchema,
@@ -450,6 +533,8 @@ export function registerConsole(
   app.post<{ Params: { id: string } }>('/api/console/events/:id/action', async (req, reply) => {
     const event = store.get(req.params.id);
     if (!event) return reply.code(404).send({ error: 'Message not found' });
+    if (store.pendingDeletion(event.id))
+      return reply.code(409).send({ error: 'Finish deleting this message before editing it' });
     const parsed = action.safeParse(req.body);
     if (!parsed.success)
       return reply
@@ -498,7 +583,10 @@ export function registerConsole(
     };
     if (!Number.isSafeInteger(transaction.amountCents))
       return reply.code(400).send({ error: 'Amount and fees exceed the supported range' });
-    const current = store.get(event.id)!;
+    const current = store.get(event.id);
+    if (!current) return reply.code(404).send({ error: 'Message was deleted' });
+    if (store.pendingDeletion(event.id))
+      return reply.code(409).send({ error: 'Finish deleting this message before editing it' });
     if (current.status === 'processing')
       return reply
         .code(409)
@@ -533,6 +621,10 @@ export function registerConsole(
         });
       }
     }
+    if (processor.isBusy())
+      return reply
+        .code(409)
+        .send({ error: 'A message or Actual operation is in progress. Try again shortly.' });
     store.db.transaction(() => {
       store.db
         .prepare(
@@ -641,7 +733,8 @@ export function registerConsole(
       if (conflicting)
         throw new Error('An active template already matches this SMS. Edit that template instead.');
       // Recheck after asynchronous validation; the event may have been approved in another tab.
-      const current = store.get(event.id)!;
+      const current = store.get(event.id);
+      if (!current) return reply.code(404).send({ error: 'Message was deleted' });
       if (current.status !== event.status)
         return reply
           .code(409)
@@ -671,43 +764,7 @@ export function registerConsole(
   });
   app.get('/api/console/merchants', async () => {
     store.seedMerchantProfiles(options.config.accounts);
-    const mappings = store.db
-      .prepare('SELECT * FROM merchant_mappings')
-      .all() as import('./db.js').MerchantMapping[];
-    const profiles = store.db
-      .prepare('SELECT * FROM merchant_profiles')
-      .all() as import('./db.js').MerchantProfile[];
-    const keys = new Map(
-      [...mappings, ...profiles].map((m) => [JSON.stringify([m.account_id, m.merchant_key]), m]),
-    );
-    const mappingIndex = new Map(
-      mappings.map((m) => [JSON.stringify([m.account_id, m.merchant_key]), m]),
-    );
-    const profileIndex = new Map(
-      profiles.map((m) => [JSON.stringify([m.account_id, m.merchant_key]), m]),
-    );
-    return {
-      merchants: [...keys.entries()]
-        .map(([id, key]) => {
-          const mapping = mappingIndex.get(id);
-          const profile = profileIndex.get(id);
-          return {
-            ...mapping,
-            ...key,
-            merchant: profile?.merchant ?? key.merchant_key,
-            payee: profile?.renamed
-              ? profile.payee
-              : ((mapping?.source !== 'ai' ? mapping?.payee : undefined) ??
-                profile?.payee ??
-                key.merchant_key),
-            reviewReason:
-              mapping?.review_reason ??
-              merchantReviewReason(key.merchant_key) ??
-              (mapping?.source === 'ai' ? 'AI suggestion — confirm before reuse' : undefined),
-          };
-        })
-        .sort((a, b) => (a.payee ?? '').localeCompare(b.payee ?? '')),
-    };
+    return { merchants: store.merchants.list() };
   });
   app.post('/api/console/merchants/recheck', async (_req, reply) => {
     if (processor.isBusy())
@@ -719,80 +776,74 @@ export function registerConsole(
   app.put('/api/console/merchants', async (req, reply) => {
     const body = z
       .object({
-        accountId: z.string(),
-        merchant: z.string().trim().min(1).max(200),
+        id: z.string().optional(),
+        identifiers: z.array(z.string().trim().min(1).max(300)).min(1).max(100),
         payee: z.string().trim().min(1).max(100),
-        categoryId: z.string().optional(),
+        categoryId: z.string().min(1).nullable().optional(),
       })
       .strict()
       .safeParse(req.body);
     if (!body.success)
-      return reply.code(400).send({ error: 'Enter a merchant, payee, account, and category' });
+      return reply
+        .code(400)
+        .send({ error: 'Enter a preferred name and at least one SMS identifier' });
     const b = body.data;
-    if (merchantReviewReason(b.merchant))
-      return reply.code(400).send({
-        error: 'Use the merchant description without dates, times, or generic placeholders',
-      });
-    if (
-      !(await options.actual.accounts()).some((a) => a.id === b.accountId) ||
-      !(await validateCategory(b.categoryId))
-    )
-      return reply.code(400).send({ error: 'Choose an existing account and category' });
+    if (!(await validateCategory(b.categoryId ?? undefined)))
+      return reply.code(400).send({ error: 'Choose an existing category' });
     try {
-      const updated = await processor.withActualAccess(async () => {
-        const ids: string[] = [];
+      store.merchants.validateEdit(b.id, b.payee, b.identifiers);
+      const result = await processor.withActualAccess(async () => {
+        const related = store.merchants.validateEdit(b.id, b.payee, b.identifiers);
+        const keys = new Set(
+          [
+            ...b.identifiers,
+            ...related.filter((m) => m.id !== b.id).flatMap((m) => m.identifiers),
+          ].map(merchantKey),
+        );
+        const ids = new Set<string>();
         if (options.actual.updatePayees) {
           await options.actual.sync();
-          const history = await options.actual.transactions(
-            b.accountId,
-            '1900-01-01',
-            currentBudgetDate(),
-          );
-          for (const tx of history) {
-            if (!tx.importedId?.startsWith('sms:') && !tx.importedId?.startsWith('sms-edit:'))
-              continue;
-            const description = tx.importedPayee;
-            const repair = description
-              ? store.merchantRepair(b.accountId, merchantKey(description))
-              : undefined;
-            if (
-              description &&
-              merchantKey(repair?.merchant ?? description) === merchantKey(b.merchant) &&
-              !tx.transferId &&
-              !tx.transferAccountId &&
-              !tx.isSplit &&
-              tx.payeeName !== b.payee
-            )
-              ids.push(tx.id);
+          for (const account of await options.actual.accounts()) {
+            const history = await options.actual.transactions(
+              account.id,
+              '1900-01-01',
+              currentBudgetDate(),
+            );
+            for (const tx of history) {
+              if (!tx.importedId?.startsWith('sms:') && !tx.importedId?.startsWith('sms-edit:'))
+                continue;
+              const description = tx.importedPayee;
+              const repair = description
+                ? store.merchantRepair(account.id, merchantKey(description))
+                : undefined;
+              if (
+                description &&
+                keys.has(merchantKey(repair?.merchant ?? description)) &&
+                !tx.transferId &&
+                !tx.transferAccountId &&
+                !tx.isSplit &&
+                tx.payeeName !== b.payee
+              )
+                ids.add(tx.id);
+            }
           }
-          if (ids.length) await options.actual.updatePayees(ids, b.payee);
+          if (ids.size) await options.actual.updatePayees([...ids], b.payee);
           await options.actual.sync();
         }
-        store.db.transaction(() => {
-          store.saveMerchantName(b.accountId, b.merchant, b.payee);
-          const previous = store.mapping(b.accountId, merchantKey(b.merchant));
-          const categoryId =
-            b.categoryId ||
-            (previous?.source !== 'ai' && !previous?.review_reason
-              ? previous?.category_id
-              : undefined);
-          if (categoryId)
-            store.putLocalMapping({
-              account_id: b.accountId,
-              merchant_key: merchantKey(b.merchant),
-              payee: b.payee,
-              category_id: categoryId,
-              source_ref: `console:${b.accountId}:${merchantKey(b.merchant)}`,
-              decision_at: new Date().toISOString(),
-            });
-        })();
-        return ids.length;
+        const existing = b.id ? store.merchants.get(b.id) : related[0];
+        const merchant = store.merchants.save(
+          b.id,
+          b.payee,
+          b.identifiers,
+          b.categoryId === undefined ? (existing?.category_id ?? null) : b.categoryId,
+        );
+        return { merchant, updated: ids.size };
       });
-      return { ok: true, updated };
+      return { ok: true, ...result };
     } catch (error) {
-      return reply.code(409).send({
-        error: error instanceof Error ? error.message : 'Could not update the merchant payee',
-      });
+      return reply
+        .code(409)
+        .send({ error: error instanceof Error ? error.message : 'Could not update the merchant' });
     }
   });
   app.get('/api/console/templates', async () => ({

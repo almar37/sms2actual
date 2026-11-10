@@ -11,6 +11,7 @@ import type {
 import { normalizeText, type ParserReason } from './parser.js';
 import { merchantKey, merchantReviewReason } from './merchant-identity.js';
 import { resolveAccount } from './routing.js';
+import { MerchantCatalog } from './merchant-catalog.js';
 
 export interface StoredEvent {
   id: string;
@@ -71,10 +72,13 @@ export interface InboxSyncEntry {
 
 export class EventStore {
   readonly db: Database.Database;
+  readonly merchants: MerchantCatalog;
   constructor(path: string) {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.exec(`
+    CREATE TABLE IF NOT EXISTS deleted_events(event_id TEXT PRIMARY KEY,dedupe_key TEXT UNIQUE NOT NULL,actual_transaction_id TEXT,transaction_ids TEXT NOT NULL DEFAULT '[]',imported_ids TEXT NOT NULL DEFAULT '[]',deleted_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS event_delete_requests(event_id TEXT PRIMARY KEY,transaction_ids TEXT NOT NULL,started_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,dedupe_key TEXT UNIQUE NOT NULL,status TEXT NOT NULL,payload TEXT,parsed TEXT,suggestion TEXT,parser_reason TEXT,parser_revision INTEGER,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS balances(account_alias TEXT NOT NULL,observed_at TEXT NOT NULL,balance_cents INTEGER NOT NULL,event_id TEXT NOT NULL,PRIMARY KEY(account_alias,observed_at,event_id));
     CREATE TABLE IF NOT EXISTS transfers(id INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, source_alias TEXT NOT NULL, counterparty_alias TEXT, principal_cents INTEGER NOT NULL, occurred_at TEXT NOT NULL, matched_event_id TEXT);
@@ -131,6 +135,8 @@ export class EventStore {
         this.update(row.id, 'unsupported_format', { parserReason: row.parser_reason });
     })();
     this.backfillAudit();
+    this.merchants = new MerchantCatalog(this.db);
+    this.merchants.migrate();
   }
   enqueue(input: SmsInput): { id: string; duplicate: boolean } {
     return this.db.transaction(() => this.enqueueInTransaction(input))();
@@ -143,6 +149,9 @@ export class EventStore {
             `${normalizeText(input.sender ?? '').toLowerCase()}\n${normalizeText(input.message)}`,
           )
           .digest('hex')}`;
+    const deleted = this.db
+      .prepare('SELECT event_id FROM deleted_events WHERE dedupe_key=? OR event_id=?')
+      .get(key, input.eventId ?? '') as { event_id: string } | undefined;
     const old = this.db.prepare('SELECT id FROM events WHERE dedupe_key=?').get(key) as
       { id: string } | undefined;
     if (old) {
@@ -150,7 +159,8 @@ export class EventStore {
       this.insertHistory(old.id, event.status, event.status, { duplicateSubmission: true });
       return { id: old.id, duplicate: true };
     }
-    const id = input.eventId || randomUUID(),
+    // Reuse the original ID to preserve transfer links when a deleted SMS is resubmitted.
+    const id = input.eventId || deleted?.event_id || randomUUID(),
       now = new Date().toISOString();
     this.db
       .prepare(
@@ -207,6 +217,7 @@ export class EventStore {
         .prepare('SELECT COUNT(*) count FROM enrichment_attempts')
         .get() as { count: number };
       for (const table of [
+        'event_delete_requests',
         'event_history',
         'enrichment_attempts',
         'balances',
@@ -276,11 +287,114 @@ export class EventStore {
   get(id: string): StoredEvent | undefined {
     return this.db.prepare('SELECT * FROM events WHERE id=?').get(id) as StoredEvent | undefined;
   }
+  deletedLink(id: string): string | undefined {
+    return (
+      this.db
+        .prepare('SELECT actual_transaction_id FROM deleted_events WHERE event_id=?')
+        .get(id) as { actual_transaction_id: string } | undefined
+    )?.actual_transaction_id;
+  }
+  deletedTransactionIds(id: string): string[] {
+    const row = this.db
+      .prepare('SELECT transaction_ids FROM deleted_events WHERE event_id=?')
+      .get(id) as { transaction_ids: string } | undefined;
+    return row ? (JSON.parse(row.transaction_ids) as string[]) : [];
+  }
+  deletedImportIds(id: string): string[] {
+    const row = this.db
+      .prepare('SELECT imported_ids FROM deleted_events WHERE event_id=?')
+      .get(id) as { imported_ids: string } | undefined;
+    return row ? (JSON.parse(row.imported_ids) as string[]) : [];
+  }
+  pendingDeletion(id: string): string[] | undefined {
+    const row = this.db
+      .prepare('SELECT transaction_ids FROM event_delete_requests WHERE event_id=?')
+      .get(id) as { transaction_ids: string } | undefined;
+    return row ? (JSON.parse(row.transaction_ids) as string[]) : undefined;
+  }
+  beginDeletion(id: string, transactionIds: string[]) {
+    this.db
+      .prepare(
+        'INSERT INTO event_delete_requests(event_id,transaction_ids,started_at) VALUES(?,?,?) ON CONFLICT(event_id) DO UPDATE SET transaction_ids=excluded.transaction_ids',
+      )
+      .run(id, JSON.stringify(transactionIds), new Date().toISOString());
+  }
+  deleteMessage(
+    id: string,
+    principalId?: string,
+    deletedActualIds: string[] = [],
+    importedIds: string[] = [],
+  ) {
+    this.db.transaction(() => {
+      const event = this.get(id);
+      if (!event) return;
+      if (event.status === 'processing')
+        throw new Error('This message is being processed. Try again shortly.');
+      this.db
+        .prepare(
+          `INSERT INTO deleted_events(event_id,dedupe_key,actual_transaction_id,transaction_ids,imported_ids,deleted_at) VALUES(?,?,?,?,?,?)
+          ON CONFLICT(event_id) DO UPDATE SET dedupe_key=excluded.dedupe_key,actual_transaction_id=COALESCE(excluded.actual_transaction_id,deleted_events.actual_transaction_id),transaction_ids=CASE WHEN excluded.transaction_ids='[]' THEN deleted_events.transaction_ids ELSE excluded.transaction_ids END,imported_ids=CASE WHEN excluded.imported_ids='[]' THEN deleted_events.imported_ids ELSE excluded.imported_ids END,deleted_at=excluded.deleted_at`,
+        )
+        .run(
+          id,
+          event.dedupe_key,
+          principalId ?? event.actual_transaction_id,
+          JSON.stringify(
+            [
+              principalId ?? event.actual_transaction_id,
+              event.parsed
+                ? (JSON.parse(event.parsed) as ParsedTransaction).importedFeeId
+                : undefined,
+            ].filter(Boolean),
+          ),
+          JSON.stringify(importedIds),
+          new Date().toISOString(),
+        );
+      for (const table of [
+        'event_history',
+        'enrichment_attempts',
+        'balances',
+        'transfers',
+        'console_overrides',
+        'event_delete_requests',
+      ]) {
+        if (
+          this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)
+        )
+          this.db.prepare(`DELETE FROM ${table} WHERE event_id=?`).run(id);
+      }
+      // Keep the other transfer SMS matched: its transaction still exists when Actual is kept.
+      if (this.db.prepare("SELECT name FROM sqlite_master WHERE name='console_settings'").get())
+        this.db
+          .prepare(
+            "DELETE FROM console_settings WHERE key LIKE 'limit:%' AND json_extract(value,'$.eventId')=?",
+          )
+          .run(id);
+      this.db.prepare('DELETE FROM events WHERE id=?').run(id);
+      for (const actualId of deletedActualIds) {
+        this.db
+          .prepare('DELETE FROM actual_mapping_observations WHERE actual_transaction_id=?')
+          .run(actualId);
+        const others = this.db
+          .prepare('SELECT id FROM events WHERE actual_transaction_id=?')
+          .all(actualId) as { id: string }[];
+        for (const other of others)
+          this.recordEnrichment(other.id, 'user_actual_deleted', {
+            deletedWithMessage: id,
+            transactionId: actualId,
+          });
+      }
+      if (deletedActualIds.length) {
+        this.merchants.resetHistory();
+        this.rebuildMerchantMappings();
+      }
+    })();
+  }
   claim(): StoredEvent | undefined {
     const tx = this.db.transaction(() => {
       const e = this.db
         .prepare(
-          "SELECT * FROM events WHERE status='queued' AND next_attempt_at<=? ORDER BY created_at, rowid LIMIT 1",
+          "SELECT * FROM events WHERE status='queued' AND next_attempt_at<=? AND id NOT IN (SELECT event_id FROM event_delete_requests) ORDER BY created_at, rowid LIMIT 1",
         )
         .get(new Date().toISOString()) as StoredEvent | undefined;
       if (e) {
@@ -354,12 +468,12 @@ export class EventStore {
       const now = new Date().toISOString();
       const replayed = this.db
         .prepare(
-          "SELECT id,status FROM events WHERE status IN ('ignored','needs_review','unsupported_format','queued','failed') AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
+          "SELECT id,status FROM events WHERE status IN ('ignored','needs_review','unsupported_format','queued','failed') AND id NOT IN (SELECT event_id FROM event_delete_requests) AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
         )
         .all(revision) as { id: string; status: EventStatus }[];
       const result = this.db
         .prepare(
-          "UPDATE events SET status='queued',parser_reason=NULL,parser_revision=?,error=NULL,attempts=0,next_attempt_at=?,updated_at=? WHERE status IN ('ignored','needs_review','unsupported_format','queued','failed') AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
+          "UPDATE events SET status='queued',parser_reason=NULL,parser_revision=?,error=NULL,attempts=0,next_attempt_at=?,updated_at=? WHERE status IN ('ignored','needs_review','unsupported_format','queued','failed') AND id NOT IN (SELECT event_id FROM event_delete_requests) AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
         )
         .run(revision, now, now, revision);
       for (const event of replayed)
@@ -391,7 +505,7 @@ export class EventStore {
   ): { event_id: string; source_alias: string }[] {
     return this.db
       .prepare(
-        'SELECT event_id,source_alias FROM transfers WHERE event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND matched_event_id IS NULL ORDER BY ABS(julianday(occurred_at)-julianday(?))',
+        'SELECT event_id,source_alias FROM transfers WHERE event_id IN (SELECT id FROM events) AND event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND matched_event_id IS NULL ORDER BY ABS(julianday(occurred_at)-julianday(?))',
       )
       .all(eventId, alias, -amount, at, at, at) as { event_id: string; source_alias: string }[];
   }
@@ -497,6 +611,7 @@ export class EventStore {
   }
   observeMerchant(accountId: string, merchant: string) {
     if (merchantReviewReason(merchant)) return;
+    this.merchants.observe(merchant);
     this.db
       .prepare(
         'INSERT OR IGNORE INTO merchant_profiles(account_id,merchant_key,merchant,payee,updated_at) VALUES(?,?,?,?,?)',
@@ -504,6 +619,13 @@ export class EventStore {
       .run(accountId, merchantKey(merchant), merchant, merchant, new Date().toISOString());
   }
   saveMerchantName(accountId: string, merchant: string, payee: string) {
+    const existing = this.merchants.find(merchant);
+    this.merchants.save(
+      existing?.id,
+      payee,
+      existing?.identifiers ?? [merchant],
+      existing?.category_id ?? null,
+    );
     this.db
       .prepare(
         `INSERT INTO merchant_profiles(account_id,merchant_key,merchant,payee,renamed,updated_at) VALUES(?,?,?,?,1,?)
@@ -563,6 +685,14 @@ export class EventStore {
         now,
         mapping.review_reason ?? null,
       );
+    this.merchants.record({
+      identifier: mapping.merchant_key,
+      payee: mapping.payee,
+      categoryId: mapping.category_id,
+      source: mapping.source,
+      at: mapping.decision_at,
+      reviewReason: mapping.review_reason,
+    });
   }
   putLocalMapping(
     mapping: Omit<MerchantMapping, 'updated_at' | 'source'> & { source?: 'local' | 'ai' },
@@ -586,6 +716,19 @@ export class EventStore {
           now,
           mapping.source ?? 'local',
         );
+      if (
+        mapping.source !== 'ai' &&
+        mapping.source_ref?.startsWith('console') &&
+        !merchantReviewReason(mapping.merchant_key)
+      ) {
+        const existing = this.merchants.find(mapping.merchant_key);
+        this.merchants.save(
+          existing?.id,
+          mapping.payee,
+          existing?.identifiers ?? [mapping.merchant_key],
+          mapping.category_id,
+        );
+      }
       this.putMapping({
         ...mapping,
         source: mapping.source ?? 'local',
@@ -623,6 +766,7 @@ export class EventStore {
           }[]
         ).map((observation) => [observation.actual_transaction_id, observation]),
       );
+      this.merchants.resetHistory();
       this.db.prepare('DELETE FROM actual_mapping_observations').run();
       const insert = this.db.prepare(
         'INSERT INTO actual_mapping_observations(actual_transaction_id,account_id,merchant_key,payee,category_id,transaction_date,decision_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',

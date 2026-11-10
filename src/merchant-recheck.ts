@@ -176,6 +176,8 @@ export function recheckMerchants(store: EventStore, config: ResolvedConfig): Mer
           JSON.stringify(originals),
           now,
         );
+      if (uncertain) store.merchants.flag(proposal.originalKey, reviewReason!);
+      else if (merchantValue) store.observeMerchant(proposal.accountId, merchantValue);
       // Old Actual observations may be unconfirmed service imports. Keep their
       // suggestions visible even when the next history refresh removes that evidence.
       if (merchantKeyValue && merchantValue)

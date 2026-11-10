@@ -20,6 +20,65 @@
     busy = $state(false),
     selected = $state<any>(null),
     form = $state<any>({});
+  let deletion = $state<any>(null),
+    deletionPlan = $state<any>(null),
+    deletionLoading = $state(false),
+    deletionBusy = $state(false),
+    deletionError = $state(''),
+    deleteChoice = $state('keep');
+  let deleteDialog = $state<HTMLDialogElement>();
+  let deletionRequest = 0;
+  async function prepareDelete(event?: any) {
+    if (deletionBusy) return;
+    if (event) deletion = event;
+    const request = ++deletionRequest,
+      id = deletion.id;
+    deletionPlan = null;
+    deletionError = '';
+    deleteChoice = 'keep';
+    deletionLoading = true;
+    try {
+      const plan = await api('/api/console/events/' + encodeURIComponent(id) + '/deletion');
+      if (request === deletionRequest && deletion?.id === id) deletionPlan = plan;
+    } catch (e) {
+      if (request === deletionRequest) deletionError = (e as Error).message;
+    } finally {
+      if (request === deletionRequest) deletionLoading = false;
+    }
+  }
+  async function deleteMessage(event: SubmitEvent) {
+    event.preventDefault();
+    if (!deletionPlan || deletionBusy) return;
+    deletionBusy = true;
+    deletionError = '';
+    const id = deletion.id;
+    try {
+      const result = await api(
+        '/api/console/events/' + encodeURIComponent(id),
+        {
+          confirmation: 'DELETE',
+          deleteActual: deleteChoice === 'delete',
+          eventRevision: deletionPlan.eventRevision,
+          actualRevision: deleteChoice === 'delete' ? deletionPlan.revision : undefined,
+        },
+        'DELETE',
+      );
+      if (selected?.id === id) selected = null;
+      deletionBusy = false;
+      deletion = null;
+      notify(
+        result.deletedActual
+          ? 'SMS and linked Actual entries deleted.'
+          : 'SMS deleted. Actual transactions kept.',
+      );
+      if (data?.events?.length === 1 && page > 1) page--;
+      await load();
+    } catch (e) {
+      deletionError = (e as Error).message;
+    } finally {
+      deletionBusy = false;
+    }
+  }
   let searchTimer: ReturnType<typeof setTimeout>;
   const transfer = $derived(['transfer_in', 'transfer_out', 'card_payment'].includes(form.kind));
   const linkedTransfer = $derived(transfer && Boolean(form.targetAccountId));
@@ -228,9 +287,11 @@
               ><span
                 class={'status status-' +
                   (event.categoryNeedsAttention ? 'imported_review' : event.status)}
-                >{event.categoryNeedsAttention
-                  ? 'Imported · category needs review'
-                  : label(event.status)}</span
+                >{event.deletionPending
+                  ? 'Deletion pending'
+                  : event.categoryNeedsAttention
+                    ? 'Imported · category needs review'
+                    : label(event.status)}</span
               ></td
             ><td class="number" class:positive={(event.parsed?.amountCents ?? 0) > 0}
               >{money(event.parsed?.amountCents)}</td
@@ -239,6 +300,11 @@
                 class="icon-button"
                 aria-label={'Review message from ' + (event.input?.sender ?? 'unknown sender')}
                 onclick={() => void open(event.id)}><Icon name="chevron" size={17} /></button
+              ><button
+                class="icon-button danger"
+                aria-label={'Delete message from ' + (event.input?.sender ?? 'unknown sender')}
+                disabled={event.status === 'processing' || deletionBusy}
+                onclick={() => void prepareDelete(event)}><Icon name="trash" size={17} /></button
               ></td
             ></tr
           >{/each}</tbody
@@ -294,6 +360,12 @@
         <span class="eyebrow">A CLOSER LOOK</span>
         <h2>Review message</h2>
       </div>
+      <button
+        class="danger"
+        disabled={selected.status === 'processing' || deletionBusy}
+        onclick={() => void prepareDelete(selected)}
+        ><Icon name="trash" size={16} />Delete SMS</button
+      >
       <button class="icon-button" aria-label="Close review" onclick={() => (selected = null)}
         ><Icon name="close" /></button
       >
@@ -321,6 +393,10 @@
         >
       </div>
       {#if selected.error}<div class="error">{selected.error}</div>{/if}
+      {#if selected.deletionPending}<div class="info-box">
+          A previous Actual deletion did not finish. Use Delete SMS to refresh linked entries and
+          retry, or remove only the SMS.
+        </div>{/if}
       {#if imported}<div class="info-box">
           Changes saved here update the linked transaction in Actual.
           {#if selected.actualSync?.error}<p class="error-text">{selected.actualSync.error}</p>{/if}
@@ -439,7 +515,9 @@
               ><Icon name="templates" size={16} />Save as template</button
             ><button
               class="primary"
-              disabled={busy || Boolean(imported && !selected.actualSync?.revision)}
+              disabled={busy ||
+                selected.deletionPending ||
+                Boolean(imported && !selected.actualSync?.revision)}
               >{busy ? 'Saving…' : imported ? 'Save to Actual' : 'Approve & import'}<Icon
                 name="check"
                 size={16}
@@ -461,4 +539,92 @@
           </div>{/each}
       </details>
     </div>
+  </dialog>{/if}
+
+{#if deletion}<dialog
+    class="modal"
+    use:modal
+    bind:this={deleteDialog}
+    aria-label="Delete SMS"
+    oncancel={(event) => {
+      if (deletionBusy) event.preventDefault();
+    }}
+    onclose={() => {
+      if (deletionBusy) deleteDialog?.showModal();
+      else deletion = null;
+    }}
+  >
+    <div class="drawer-heading">
+      <h2>Delete this SMS?</h2>
+      <button
+        class="icon-button"
+        aria-label="Close deletion confirmation"
+        disabled={deletionBusy}
+        onclick={() => (deletion = null)}><Icon name="close" /></button
+      >
+    </div>
+    <form class="panel-body" onsubmit={deleteMessage}>
+      <p>
+        This removes the SMS and its processing logs from sms2actual. Your phone’s inbox is
+        unchanged. To restore this SMS later, move the sync checkpoint before it and resync Tasker.
+      </p>
+      <div class="sms-original">
+        <strong>{deletion.input?.sender ?? 'Unknown sender'}</strong>
+        <p dir="auto">{deletion.input?.message}</p>
+      </div>
+      {#if deletionLoading}<p role="status">Checking linked Actual entries…</p>{/if}
+      {#if deletionPlan?.error}<div class="info-box">
+          Could not check Actual: {deletionPlan.error} You can still delete only the SMS.
+        </div>{/if}
+      {#if deletionPlan?.transactionIds?.length}
+        <label
+          >Also delete the associated Actual transaction?<select
+            bind:value={deleteChoice}
+            disabled={deletionBusy}
+          >
+            <option value="keep">No — keep Actual entries</option><option
+              value="delete"
+              disabled={!deletionPlan.canDeleteActual}
+              >Yes — delete linked Actual entries too</option
+            >
+          </select></label
+        >
+        {#if !deletionPlan.canDeleteActual}<p class="muted small">
+            Actual deletion is unavailable. You can keep the entries and delete the SMS.
+          </p>{/if}
+        <div class="parse-result">
+          {#each deletionPlan.transactions as transaction (transaction.id)}<p>
+              <strong>{transaction.payee ?? 'Linked transaction'}</strong> · {money(
+                transaction.amount,
+              )}{#if transaction.accountName}
+                · {transaction.accountName}{/if}
+            </p>{/each}
+        </div>
+        {#if deletionPlan.linkedTransfer}<p class="muted small">
+            This includes both sides of the linked transfer and any associated fees.
+          </p>{:else}<p class="muted small">Any associated fee entry is included.</p>{/if}
+        {#if deletionPlan.includesSplits}<p class="muted small">
+            Deleting the Actual transaction also removes its split lines.
+          </p>{/if}
+      {:else if deletionPlan && !deletionPlan.error}<p>
+          No linked Actual entries were found. Only the SMS will be removed.
+        </p>{/if}
+      {#if deletionError}<div class="error" role="alert">{deletionError}</div>{/if}
+      <div class="form-actions">
+        <button type="button" disabled={deletionBusy} onclick={() => (deletion = null)}
+          >Cancel</button
+        ><button
+          type="button"
+          disabled={deletionBusy || deletionLoading}
+          onclick={() => void prepareDelete()}>Refresh linked entries</button
+        >
+        <button class="danger" disabled={deletionBusy || deletionLoading || !deletionPlan}
+          >{deletionBusy
+            ? 'Deleting…'
+            : deleteChoice === 'delete'
+              ? 'Delete SMS & Actual entries'
+              : 'Delete SMS only'}</button
+        >
+      </div>
+    </form>
   </dialog>{/if}

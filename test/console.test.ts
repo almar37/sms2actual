@@ -1099,23 +1099,22 @@ describe('console access and APIs', () => {
         method: 'PUT',
         url: '/api/console/merchants',
         headers,
-        payload: { accountId: 'checking', merchant, payee: 'Wrong', categoryId: 'food' },
+        payload: { identifiers: [merchant], payee: 'Wrong', categoryId: 'food' },
       });
-      expect(invalid.statusCode).toBe(400);
+      expect(invalid.statusCode).toBe(409);
     }
     const edit = await app.inject({
       method: 'PUT',
       url: '/api/console/merchants',
       headers,
       payload: {
-        accountId: 'checking',
-        merchant: 'COFFEE SHOP',
+        identifiers: ['COFFEE SHOP'],
         payee: 'Coffee Shop',
         categoryId: 'food',
       },
     });
     expect(edit.statusCode, edit.body).toBe(200);
-    expect(store.mapping('checking', 'coffee shop')).toMatchObject({
+    expect(store.merchants.find('coffee shop')).toMatchObject({
       payee: 'Coffee Shop',
       category_id: 'food',
       source: 'local',
@@ -1124,10 +1123,10 @@ describe('console access and APIs', () => {
     expect(
       confirmed
         .json()
-        .merchants.find(
-          (mapping: { merchant_key: string }) => mapping.merchant_key === 'coffee shop',
+        .merchants.find((m: { identifiers: string[] }) =>
+          m.identifiers.some((i) => i.toLowerCase() === 'coffee shop'),
         ).reviewReason,
-    ).toBeUndefined();
+    ).toBeNull();
     const save = await app.inject({
       method: 'PUT',
       url: '/api/console/ai',
@@ -1194,7 +1193,7 @@ describe('console access and APIs', () => {
     const list = await app.inject({ url: '/api/console/merchants', headers });
     expect(list.json().merchants).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ merchant_key: 'amazon sa', source: 'ai' }),
+        expect.objectContaining({ identifiers: ['Amazon sa'], source: 'ai' }),
       ]),
     );
     expect(store.get(id)?.actual_transaction_id).toBe('existing-id');
@@ -2118,13 +2117,17 @@ describe('merchant identifiers and preferred names', () => {
     });
     const list = (await app.inject({ url: '/api/console/merchants', headers })).json().merchants;
     expect(list).toContainEqual(
-      expect.objectContaining({ merchant: 'COFFEE-HOUSE', payee: 'COFFEE-HOUSE' }),
+      expect.objectContaining({ identifiers: ['COFFEE-HOUSE'], payee: 'COFFEE-HOUSE' }),
     );
     const saved = await app.inject({
       method: 'PUT',
       url: '/api/console/merchants',
       headers,
-      payload: { accountId: 'checking', merchant: 'COFFEE-HOUSE', payee: 'My coffee place' },
+      payload: {
+        id: store.merchants.find('COFFEE-HOUSE')!.id,
+        identifiers: ['COFFEE-HOUSE'],
+        payee: 'My coffee place',
+      },
     });
     expect(saved.statusCode, saved.body).toBe(200);
     store.enqueue({
@@ -2140,10 +2143,10 @@ describe('merchant identifiers and preferred names', () => {
     expect(JSON.parse(store.get(id)!.parsed!).payee).toBe('COFFEE-HOUSE');
     await app.close();
   });
-  it('updates only ordinary service-imported payees in the selected account', async () => {
+  it('updates only ordinary service-imported payees across accounts', async () => {
     const { app, headers, actual, store } = await server();
     actual.updatePayees = vi.fn(async () => {});
-    actual.transactions = vi.fn(async () => [
+    const rows = [
       {
         id: 'own',
         importedId: 'sms:one',
@@ -2176,22 +2179,30 @@ describe('merchant identifiers and preferred names', () => {
         accountId: 'checking',
         date: '2026-11-05',
       },
-    ]);
+      {
+        id: 'credit-entry',
+        importedId: 'sms:credit',
+        importedPayee: 'COFFEE TERMINAL',
+        payeeName: 'Old name',
+        accountId: 'credit',
+        date: '2026-11-05',
+      },
+    ];
+    actual.transactions = vi.fn(async (id) => rows.filter((tx) => tx.accountId === id));
     const response = await app.inject({
       method: 'PUT',
       url: '/api/console/merchants',
       headers,
       payload: {
-        accountId: 'checking',
-        merchant: 'COFFEE-HOUSE',
+        identifiers: ['COFFEE-HOUSE', 'COFFEE TERMINAL'],
         payee: 'Coffee',
         categoryId: 'food',
       },
     });
     expect(response.statusCode, response.body).toBe(200);
-    expect(response.json().updated).toBe(1);
-    expect(actual.updatePayees).toHaveBeenCalledWith(['own'], 'Coffee');
-    expect(store.merchantProfile('checking', 'COFFEE-HOUSE')?.payee).toBe('Coffee');
+    expect(response.json().updated).toBe(2);
+    expect(actual.updatePayees).toHaveBeenCalledWith(['own', 'credit-entry'], 'Coffee');
+    expect(store.merchants.find('COFFEE-HOUSE')?.payee).toBe('Coffee');
     actual.updatePayees = vi.fn(async () => {
       throw new Error('Actual unavailable');
     });
@@ -2199,10 +2210,14 @@ describe('merchant identifiers and preferred names', () => {
       method: 'PUT',
       url: '/api/console/merchants',
       headers,
-      payload: { accountId: 'checking', merchant: 'COFFEE-HOUSE', payee: 'New' },
+      payload: {
+        id: store.merchants.find('COFFEE-HOUSE')!.id,
+        identifiers: ['COFFEE-HOUSE'],
+        payee: 'New',
+      },
     });
     expect(failed.statusCode).toBe(409);
-    expect(store.merchantProfile('checking', 'COFFEE-HOUSE')?.payee).toBe('Coffee');
+    expect(store.merchants.find('COFFEE-HOUSE')?.payee).toBe('Coffee');
     await app.close();
   });
 });
@@ -2342,5 +2357,261 @@ it('does not let a learned format override an ignored OTP', async () => {
   await processor.tick();
   expect(store.get(id)).toMatchObject({ status: 'ignored', parser_reason: 'otp_or_login' });
   expect(imports).not.toHaveBeenCalled();
+  await app.close();
+});
+
+it('imports multiple SMS identifiers with the shared name and category while routing each card correctly', async () => {
+  const { app, headers, store, processor, imports } = await server();
+  const saved = await app.inject({
+    method: 'PUT',
+    url: '/api/console/merchants',
+    headers,
+    payload: {
+      payee: 'Shared cafe',
+      identifiers: ['ALPHA CAFE POS', 'BETA CAFE TERMINAL'],
+      categoryId: 'food',
+    },
+  });
+  expect(saved.statusCode, saved.body).toBe(200);
+  const before = saved.json().merchant.id;
+  for (const [suffix, merchant] of [
+    ['1234', 'ALPHA CAFE POS'],
+    ['5678', 'BETA CAFE TERMINAL'],
+  ]) {
+    store.enqueue({
+      sender: 'SAB',
+      message: `SAB purchase Card **${suffix} Amount SAR 25 at ${merchant} on 2026-11-05 10:00`,
+      receivedAt: now,
+    });
+    await processor.tick();
+  }
+  expect(imports.mock.calls.map((call) => call[0])).toEqual(['checking', 'credit']);
+  for (const call of imports.mock.calls)
+    expect(call[1][0]).toMatchObject({ payee_name: 'Shared cafe', category: 'food' });
+  expect(imports.mock.calls[0]?.[1][0]?.imported_id).not.toBe(
+    imports.mock.calls[1]?.[1][0]?.imported_id,
+  );
+  const list = (await app.inject({ url: '/api/console/merchants', headers })).json().merchants;
+  expect(list).toEqual([
+    expect.objectContaining({
+      id: before,
+      payee: 'Shared cafe',
+      identifiers: ['ALPHA CAFE POS', 'BETA CAFE TERMINAL'],
+    }),
+  ]);
+  await app.close();
+});
+
+describe('delete messages from the SMS inbox', () => {
+  it('requires authentication, same-origin requests, confirmation and an explicit Actual choice', async () => {
+    const { app, headers, store } = await server();
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: 'Delete this review SMS',
+      receivedAt: now,
+    });
+    const url = `/api/console/events/${id}`;
+    expect((await app.inject({ url: url + '/deletion' })).statusCode).toBe(401);
+    const plan = (await app.inject({ url: url + '/deletion', headers })).json();
+    expect(plan.transactionIds).toEqual([]);
+    const payload = {
+      confirmation: 'DELETE',
+      deleteActual: false,
+      eventRevision: plan.eventRevision,
+    };
+    expect(
+      (await app.inject({ method: 'DELETE', url, headers: { origin }, payload })).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url,
+          headers: { ...headers, origin: 'https://evil.test' },
+          payload,
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url,
+          headers,
+          payload: { confirmation: 'DELETE', eventRevision: plan.eventRevision },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(store.get(id)).toBeDefined();
+    const response = await app.inject({ method: 'DELETE', url, headers, payload });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().deletedActual).toBe(false);
+    expect((await app.inject({ url, headers })).statusCode).toBe(404);
+    expect(store.claim()).toBeUndefined();
+    await app.close();
+  });
+  it('keeps Actual entries by default and allows SMS-only deletion during an Actual outage', async () => {
+    const { app, headers, store, actual } = await server();
+    const { id } = store.enqueue({
+      eventId: 'outage-delete',
+      sender: 'SAB',
+      message: 'Imported SMS',
+      receivedAt: now,
+    });
+    store.update(id, 'imported', { actualTransactionId: 'old-id' });
+    actual.sync = vi.fn(async () => {
+      throw new Error('Actual is offline');
+    });
+    actual.deleteTransactions = vi.fn(async () => {});
+    const url = `/api/console/events/${id}`;
+    const plan = (await app.inject({ url: url + '/deletion', headers })).json();
+    expect(plan).toMatchObject({ canDeleteActual: false, error: 'Actual is offline' });
+    const response = await app.inject({
+      method: 'DELETE',
+      url,
+      headers,
+      payload: { confirmation: 'DELETE', deleteActual: false, eventRevision: plan.eventRevision },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(actual.deleteTransactions).not.toHaveBeenCalled();
+    expect(
+      store.enqueue({ eventId: id, sender: 'SAB', message: 'Imported SMS', receivedAt: now })
+        .duplicate,
+    ).toBe(false);
+    await app.close();
+  });
+  it('requires a fresh Actual confirmation, removes linked entries, and keeps an SMS on failure', async () => {
+    const { app, headers, store, actual } = await server();
+    const { id } = store.enqueue({ message: 'Imported SMS to delete', receivedAt: now });
+    store.update(id, 'imported', { actualTransactionId: 'tx-id' });
+    const rows: HistoricalTransaction[] = [
+      { id: 'tx-id', accountId: 'checking', date: '2026-11-05', amount: -2500, payeeName: 'Shop' },
+    ];
+    actual.transactions = async (accountId) => rows.filter((r) => r.accountId === accountId);
+    actual.deleteTransactions = vi.fn(async (ids) => {
+      for (let i = rows.length - 1; i >= 0; i--) if (ids.includes(rows[i]!.id)) rows.splice(i, 1);
+    });
+    const url = `/api/console/events/${id}`;
+    const plan = (await app.inject({ url: url + '/deletion', headers })).json();
+    const payload = {
+      confirmation: 'DELETE',
+      deleteActual: true,
+      eventRevision: plan.eventRevision,
+      actualRevision: plan.revision,
+    };
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url,
+          headers,
+          payload: { ...payload, actualRevision: undefined },
+        })
+      ).statusCode,
+    ).toBe(400);
+    rows[0]!.amount = -3000;
+    expect((await app.inject({ method: 'DELETE', url, headers, payload })).statusCode).toBe(409);
+    expect(actual.deleteTransactions).not.toHaveBeenCalled();
+    const fresh = (await app.inject({ url: url + '/deletion', headers })).json();
+    vi.mocked(actual.deleteTransactions).mockRejectedValueOnce(new Error('Actual write failed'));
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url,
+          headers,
+          payload: { ...payload, actualRevision: fresh.revision },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(store.get(id)).toBeDefined();
+    expect(
+      (await app.inject({ url: '/api/console/events', headers })).json().events[0].deletionPending,
+    ).toBe(true);
+    expect(
+      (await app.inject({ method: 'POST', url: url + '/action', headers, payload: {} })).statusCode,
+    ).toBe(409);
+    const retry = (await app.inject({ url: url + '/deletion', headers })).json();
+    const result = await app.inject({
+      method: 'DELETE',
+      url,
+      headers,
+      payload: { ...payload, eventRevision: retry.eventRevision, actualRevision: retry.revision },
+    });
+    expect(result.statusCode, result.body).toBe(200);
+    expect(rows).toEqual([]);
+    expect(store.get(id)).toBeUndefined();
+    await app.close();
+  });
+  it('blocks deleting processing messages and stale confirmations after queue progress', async () => {
+    const { app, headers, store } = await server();
+    const { id } = store.enqueue({ message: 'Pending SMS', receivedAt: now });
+    const url = `/api/console/events/${id}`;
+    const plan = (await app.inject({ url: url + '/deletion', headers })).json();
+    store.claim();
+    expect((await app.inject({ url: url + '/deletion', headers })).statusCode).toBe(409);
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url,
+          headers,
+          payload: {
+            confirmation: 'DELETE',
+            deleteActual: false,
+            eventRevision: plan.eventRevision,
+          },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(store.get(id)?.status).toBe('processing');
+    await app.close();
+  });
+});
+
+it('restores a deleted inbox SMS after rewinding Tasker and deduplicates later resyncs', async () => {
+  const { app, store, headers } = await server();
+  const checkpoint = store.startInboxSync(1000);
+  const row = { rowId: 1, date: 1001, sender: 'SAB', message: 'A bank SMS to restore' };
+  const taskerHeaders = { 'x-api-key': apiKey };
+  const submit = (cursor: typeof checkpoint) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/inbox-sync/batch',
+      headers: taskerHeaders,
+      payload: { checkpoint: cursor, rows: [row] },
+    });
+  const first = await submit(checkpoint);
+  expect(first.statusCode).toBe(202);
+  const id = first.json().results[0].eventId;
+  const preview = (await app.inject({ url: `/api/console/events/${id}/deletion`, headers })).json();
+  const deleted = await app.inject({
+    method: 'DELETE',
+    url: `/api/console/events/${id}`,
+    headers,
+    payload: { confirmation: 'DELETE', deleteActual: false, eventRevision: preview.eventRevision },
+  });
+  expect(deleted.statusCode).toBe(200);
+  expect(store.get(id)).toBeUndefined();
+  expect(store.inboxCheckpoint()).toEqual({ date: row.date, rowId: row.rowId });
+  const rewind = await app.inject({
+    method: 'POST',
+    url: '/v1/inbox-sync/rewind',
+    headers: taskerHeaders,
+    payload: { date: checkpoint.date },
+  });
+  const restored = await submit(rewind.json().checkpoint);
+  expect(restored.json().results[0]).toMatchObject({ eventId: id, outcome: 'queued' });
+  expect(JSON.parse(store.get(id)!.payload!).message).toBe(row.message);
+  const inbox = (await app.inject({ url: '/api/console/events', headers })).json();
+  expect(inbox.events).toHaveLength(1);
+  const again = await app.inject({
+    method: 'POST',
+    url: '/v1/inbox-sync/rewind',
+    headers: taskerHeaders,
+    payload: { date: checkpoint.date },
+  });
+  expect((await submit(again.json().checkpoint)).json().results[0].outcome).toBe('duplicate');
+  expect((await app.inject({ url: '/api/console/events', headers })).json().events).toHaveLength(1);
   await app.close();
 });

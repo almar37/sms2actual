@@ -172,6 +172,7 @@ export interface ActualAdapter {
     endDate: string,
     limit?: number,
   ): Promise<HistoricalTransaction[]>;
+  deleteTransactions?(transactionIds: string[]): Promise<void>;
   updatePayees?(transactionIds: string[], payeeName: string): Promise<void>;
   updateTransactions?(updates: ActualTransactionUpdate[]): Promise<void>;
   transferPayee(accountId: string): Promise<string>;

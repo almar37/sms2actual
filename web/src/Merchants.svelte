@@ -11,9 +11,7 @@
     error = $state('');
   const filtered = $derived(
     merchants.filter((m) =>
-      (m.payee + ' ' + m.merchant + ' ' + m.merchant_key)
-        .toLowerCase()
-        .includes(search.toLowerCase()),
+      (m.payee + ' ' + m.identifiers.join(' ')).toLowerCase().includes(search.toLowerCase()),
     ),
   );
   async function load() {
@@ -30,10 +28,13 @@
       const result = await api(
         '/api/console/merchants',
         {
-          accountId: form.accountId,
-          merchant: form.merchant,
+          id: form.id,
+          identifiers: form.identifiers
+            .split('\n')
+            .map((s: string) => s.trim())
+            .filter(Boolean),
           payee: form.payee,
-          categoryId: form.categoryId || undefined,
+          categoryId: form.categoryId || null,
         },
         'PUT',
       );
@@ -65,21 +66,14 @@
   function edit(m?: any) {
     form = m
       ? {
-          accountId: m.account_id,
-          merchant: m.merchant ?? m.merchant_key,
+          id: m.id,
+          identifiers: m.identifiers.join('\n'),
           payee: m.payee,
-          categoryId: m.reviewReason ? '' : (m.category_id ?? ''),
+          categoryId: m.conflict ? '' : (m.category_id ?? ''),
           existing: true,
           customName: true,
         }
-      : {
-          accountId: catalog.accounts[0]?.id ?? '',
-          merchant: '',
-          customName: false,
-          payee: '',
-          categoryId: '',
-          existing: false,
-        };
+      : { identifiers: '', payee: '', categoryId: '', existing: false, customName: false };
   }
   onMount(() => {
     void load();
@@ -103,10 +97,9 @@
 </div>
 <div class="info-box subtle">
   <Icon name="ai" size={20} /><span
-    >Confirmed merchants are checked before AI. Suggestions marked for review are not reused until
-    you confirm them. The SMS identifier stays separate from your preferred name. Your preferred
-    name updates matching SMS payees in Actual and applies to future messages, even when a template
-    sets the category.</span
+    >Merchants are shared across all accounts and cards. Add every SMS spelling under one preferred
+    name. Saving the same preferred name combines merchants and their identifiers. Conflicting
+    categories need your review.</span
   >
 </div>
 {#if error}<div class="error" role="alert">{error}</div>{/if}
@@ -125,12 +118,12 @@
     <table>
       <thead
         ><tr
-          ><th>Preferred name</th><th>SMS identifier</th><th>Account</th><th>Category</th><th
-            >Learned from</th
-          ><th>Last updated</th><th></th></tr
+          ><th>Preferred name</th><th>SMS identifiers</th><th>Category</th><th>Learned from</th><th
+            >Last updated</th
+          ><th></th></tr
         ></thead
       ><tbody
-        >{#each filtered as m (m.account_id + m.merchant_key)}<tr
+        >{#each filtered as m (m.id)}<tr
             ><td
               ><div class="payee-cell">
                 <span class="merchant-avatar">{m.payee.slice(0, 1).toUpperCase()}</span>
@@ -138,8 +131,8 @@
                   <strong>{m.payee}</strong>{#if m.reviewReason}<small>{m.reviewReason}</small>{/if}
                 </div>
               </div></td
-            ><td dir="auto">{m.merchant ?? m.merchant_key}</td><td
-              >{catalog.accounts.find((a: any) => a.id === m.account_id)?.name ?? m.account_id}</td
+            ><td dir="auto"
+              >{#each m.identifiers as identifier (identifier)}<div>{identifier}</div>{/each}</td
             ><td
               ><span class="tag"
                 >{catalog.categories.find((c: any) => c.id === m.category_id)?.name ??
@@ -179,15 +172,16 @@
     </div>
     <form class="panel-body" onsubmit={save}>
       <label
-        >Merchant text from SMS<input
-          bind:value={form.merchant}
-          oninput={(e) => {
-            if (!form.customName) form.payee = e.currentTarget.value;
-          }}
-          readonly={form.existing}
-          maxlength="200"
+        >SMS identifiers<textarea
+          bind:value={form.identifiers}
+          rows="4"
           required
-        /></label
+          oninput={(e) => {
+            if (!form.customName) form.payee = e.currentTarget.value.split('\n')[0] ?? '';
+          }}></textarea><small
+          >One identifier per line, exactly as it appears in the SMS. All identifiers use the same
+          preferred name and category.</small
+        ></label
       ><label
         >Preferred name / payee<input
           bind:value={form.payee}
@@ -198,11 +192,6 @@
       >
       <div class="form-grid">
         <label
-          >Account<select bind:value={form.accountId} disabled={form.existing} required
-            >{#each catalog.accounts as a (a.id)}<option value={a.id}>{a.name}</option
-              >{/each}</select
-          ></label
-        ><label
           >Category<select bind:value={form.categoryId}
             ><option value="">Uncategorized / use AI</option
             >{#each catalog.categories.filter((c: any) => !c.isIncome) as category (category.id)}<option

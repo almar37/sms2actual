@@ -77,7 +77,21 @@ export async function readMessageActual(
       .prepare('SELECT matched_event_id FROM transfers WHERE event_id=?')
       .get(event.id) as { matched_event_id: string | null } | undefined;
     const other = pair?.matched_event_id ? store.get(pair.matched_event_id) : undefined;
-    const opposite = rows.find((row) => row.id === other?.actual_transaction_id);
+    const deletedImports = pair?.matched_event_id
+      ? store.deletedImportIds(pair.matched_event_id)
+      : [];
+    const archivedTransfers = rows.filter(
+      (row) => row.transferId && row.importedId && deletedImports.includes(row.importedId),
+    );
+    if (archivedTransfers.length > 1)
+      throw new Error('Multiple Actual transfer entries match the deleted SMS');
+    const opposite =
+      rows.find(
+        (row) =>
+          row.id ===
+          (other?.actual_transaction_id ??
+            (pair?.matched_event_id ? store.deletedLink(pair.matched_event_id) : undefined)),
+      ) ?? archivedTransfers[0];
     principal = rows.find(
       (row) => row.id === opposite?.transferId && (!account || row.accountId === account.id),
     );
@@ -155,6 +169,8 @@ export async function saveMessageActual(
   edit: MessageEdit,
   expectedRevision: string,
 ) {
+  if (store.pendingDeletion(event.id))
+    throw new Error('Finish deleting this message before editing it');
   if (!actual.updateTransactions) throw new Error('Actual transaction editing is unavailable');
   const state = await readMessageActual(actual, store, config, event);
   if (state.revision !== expectedRevision)

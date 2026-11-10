@@ -235,3 +235,37 @@ it('migrates retained unsupported formats with audit history and preserves merch
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+it('allows restoring deleted SMS after reopening while retaining in-progress deletion holds', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sms2actual-delete-'));
+  const path = join(directory, 'events.sqlite');
+  const input = {
+    eventId: 'deleted-sms',
+    sender: 'SAB',
+    message: 'Restore on resync',
+    receivedAt: new Date().toISOString(),
+  };
+  try {
+    const first = new EventStore(path);
+    const removed = first.enqueue(input);
+    first.deleteMessage(removed.id);
+    const pending = first.enqueue({ ...input, eventId: 'pending-delete' });
+    first.beginDeletion(pending.id, ['actual-id']);
+    first.close();
+    const reopened = new EventStore(path);
+    try {
+      expect(reopened.enqueue(input)).toEqual({ id: removed.id, duplicate: false });
+      expect(reopened.get(removed.id)?.status).toBe('queued');
+      reopened.deleteMessage(removed.id);
+      expect(reopened.pendingDeletion(pending.id)).toEqual(['actual-id']);
+      expect(reopened.claim()).toBeUndefined();
+      expect(reopened.replayParserRevision(99999)).toBe(0);
+      reopened.deleteMessage(pending.id);
+      expect(reopened.pendingDeletion(pending.id)).toBeUndefined();
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

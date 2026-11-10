@@ -174,6 +174,43 @@ const editableRows: HistoricalTransaction[] = [
     notes: 'Actual notes',
   },
 ];
+const deletionRows: HistoricalTransaction[] = [
+  {
+    id: 'delete-keep',
+    accountId: 'checking',
+    date: '2026-11-07',
+    amount: -1200,
+    payeeName: 'Kept merchant',
+  },
+  {
+    id: 'delete-both',
+    accountId: 'checking',
+    date: '2026-11-07',
+    amount: -1800,
+    payeeName: 'Removed merchant',
+  },
+];
+const deletionEvents = deletionRows.map((row, i) => {
+  const event = store.enqueue({
+    sender: 'SAB',
+    message: i ? 'SMS deletion removes Actual' : 'SMS deletion keeps Actual',
+    receivedAt: new Date().toISOString(),
+  });
+  store.update(event.id, 'imported', {
+    actualTransactionId: row.id,
+    parsed: {
+      bank: 'sab',
+      kind: 'purchase',
+      accountAlias: '1234',
+      amountCents: row.amount!,
+      feeCents: 0,
+      payee: row.payeeName!,
+      occurredAt: '2026-11-07T10:00:00+03:00',
+      note: 'Deletion fixture',
+    },
+  });
+  return event;
+});
 let remoteRevision = 0,
   syncedRevision = 0,
   failNextSync = false;
@@ -200,6 +237,7 @@ const actual: ActualAdapter = {
     (id === 'checking' ? syncedRevision * 10000 : 0),
   transactions: async (id) => [
     ...editableRows.filter((row) => row.accountId === id),
+    ...deletionRows.filter((row) => row.accountId === id),
     ...(syncedRevision && id === 'checking'
       ? [
           {
@@ -221,6 +259,10 @@ const actual: ActualAdapter = {
       amount: [-2500, -13475, -8900, 1500000][i],
     })),
   ],
+  deleteTransactions: async (ids) => {
+    for (let i = deletionRows.length - 1; i >= 0; i--)
+      if (ids.includes(deletionRows[i]!.id)) deletionRows.splice(i, 1);
+  },
   updateTransactions: async (updates) => {
     for (const update of updates)
       Object.assign(
@@ -253,6 +295,7 @@ const app = buildServer({
   store,
   processor: {
     tick: async () => {},
+    isBusy: () => false,
     setMinConfidence: () => {},
     withActualAccess: async (work: () => Promise<unknown>) => work(),
   } as unknown as Processor,
@@ -424,6 +467,36 @@ try {
     notes: 'Flight booking',
   });
   expect(editableRows).toHaveLength(1);
+  const keepRow = page
+    .getByRole('row')
+    .filter({ has: page.getByRole('button', { name: 'SMS deletion keeps Actual', exact: true }) });
+  await keepRow.getByRole('button', { name: 'Delete message from SAB', exact: true }).click();
+  const deleteDialog = page.getByRole('dialog', { name: 'Delete SMS', exact: true });
+  await expect(deleteDialog.getByRole('combobox')).toHaveValue('keep');
+  await deleteDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(store.get(deletionEvents[0]!.id)).toBeDefined();
+  await keepRow.getByRole('button', { name: 'Delete message from SAB', exact: true }).click();
+  await deleteDialog.getByRole('button', { name: 'Delete SMS only', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('SMS deleted. Actual transactions kept.');
+  expect(store.get(deletionEvents[0]!.id)).toBeUndefined();
+  expect(deletionRows.some((row) => row.id === 'delete-keep')).toBe(true);
+  await page.getByRole('button', { name: 'SMS deletion removes Actual', exact: true }).click();
+  await page
+    .getByRole('dialog', { name: 'Review message' })
+    .getByRole('button', { name: 'Delete SMS', exact: true })
+    .click();
+  await deleteDialog.getByRole('combobox').selectOption('delete');
+  await page.screenshot({
+    path: `${artifactDir}/delete-sms-confirmation.png`,
+    fullPage: true,
+    animations: 'disabled',
+  });
+  await deleteDialog
+    .getByRole('button', { name: 'Delete SMS & Actual entries', exact: true })
+    .click();
+  await expect(page.getByRole('status')).toContainText('SMS and linked Actual entries deleted.');
+  expect(store.get(deletionEvents[1]!.id)).toBeUndefined();
+  expect(deletionRows.some((row) => row.id === 'delete-both')).toBe(false);
   await page.getByRole('button', { name: 'Unfamiliar bank message for review' }).click();
   await expect(page.getByRole('dialog', { name: 'Review message' })).toBeVisible();
   const review = page.getByRole('dialog', { name: 'Review message' });
@@ -477,9 +550,9 @@ try {
   );
   await page.getByRole('link', { name: 'Merchants', exact: true }).click();
   await page.getByRole('button', { name: 'Add merchant' }).click();
-  await page.getByLabel('Merchant text from SMS').fill('COFFEE HOUSE');
+  await page.getByLabel('SMS identifiers').fill('COFFEE HOUSE\nCOFFEE HOUSE POS');
   await page.getByLabel('Preferred name / payee').fill('Coffee House');
-  await page.getByRole('combobox', { name: /^Account/ }).selectOption('checking');
+  await expect(page.getByRole('dialog').getByRole('combobox', { name: /^Account/ })).toHaveCount(0);
   await page.getByRole('combobox', { name: /^Category/ }).selectOption('food');
   await page.getByRole('button', { name: 'Save merchant' }).click();
   await expect(page.getByRole('table')).toContainText('Coffee House');
@@ -704,7 +777,7 @@ try {
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
-    `Browser smoke passed: owner setup, login, account/card save, SMS review, validated format learning, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, confirmed SMS/log reset, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
+    `Browser smoke passed: owner setup, login, account/card save, SMS review, confirmed SMS/Actual deletion, validated format learning, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, confirmed SMS/log reset, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
   );
 } finally {
   await browser?.close();

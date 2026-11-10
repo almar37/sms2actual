@@ -25,15 +25,27 @@ export class MerchantResolver {
     private config: ResolvedConfig,
   ) {}
 
-  lookup(accountId: string, merchant: string): MerchantMapping | undefined {
+  lookup(merchant: string): Omit<MerchantMapping, 'account_id'> | undefined {
     if (merchantReviewReason(merchant)) return;
-    const mapping = this.store.mapping(accountId, merchantKey(merchant));
-    return mapping &&
-      mapping.source !== 'ai' &&
-      !mapping.review_reason &&
-      (!this.categoriesLoaded || this.activeCategoryIds.has(mapping.category_id))
-      ? mapping
-      : undefined;
+    const m = this.store.merchants.find(merchant);
+    if (
+      !m ||
+      m.conflict ||
+      !m.category_id ||
+      m.category_priority < 2 ||
+      (this.categoriesLoaded && !this.activeCategoryIds.has(m.category_id))
+    )
+      return;
+    return {
+      merchant_key: merchantKey(merchant),
+      payee: m.name_confirmed ? m.payee : merchant,
+      category_id: m.category_id,
+      source: m.source === 'sms' ? 'local' : m.source,
+      review_reason: m.review_reason,
+      source_ref: m.id,
+      decision_at: m.decision_at,
+      updated_at: m.updated_at,
+    };
   }
 
   learnSuggestion(

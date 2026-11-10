@@ -91,6 +91,13 @@ export class ActualApiAdapter implements ActualAdapter {
       isSplit: Boolean(transaction.is_parent || transaction.parent_id),
     }));
   }
+  async deleteTransactions(transactionIds: string[]) {
+    const actual = await loadActualApi();
+    await actual.batchBudgetUpdates(async () => {
+      // Actual owns removal of split lines and the linked transfer side. Missing IDs are idempotent.
+      for (const id of new Set(transactionIds)) await actual.deleteTransaction(id);
+    });
+  }
   async updatePayees(transactionIds: string[], payeeName: string) {
     if (!transactionIds.length) return;
     const actual = await loadActualApi();

@@ -7,6 +7,7 @@ const sdk = vi.hoisted(() => ({
     { id: 'transfer-credit', name: 'Transfer', transfer_acct: 'credit' },
   ]),
   createPayee: vi.fn(async (_payee: { name: string }) => 'new-payee'),
+  deleteTransaction: vi.fn(async (_id: string) => []),
   updateTransaction: vi.fn(async (_id: string, _fields: unknown) => []),
   batchBudgetUpdates: vi.fn(async (work: () => Promise<void>) => work()),
   getAccountBalance: vi.fn<(id: string, cutoff?: Date) => Promise<number>>(),
@@ -110,4 +111,10 @@ it('changes only payee IDs during a merchant rename, preserving transaction deta
     ['sms-two', { payee: 'existing-payee' }],
   ]);
   expect(sdk.createPayee).not.toHaveBeenCalled();
+});
+
+it('deletes each linked transaction ID once through the SDK batch', async () => {
+  await adapter.deleteTransactions(['principal', 'fee', 'principal']);
+  expect(sdk.deleteTransaction.mock.calls).toEqual([['principal'], ['fee']]);
+  expect(sdk.batchBudgetUpdates).toHaveBeenCalledTimes(1);
 });
