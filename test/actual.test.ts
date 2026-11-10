@@ -102,3 +102,12 @@ describe('Actual transaction updates', () => {
     expect(sdk.createPayee).not.toHaveBeenCalled();
   });
 });
+
+it('changes only payee IDs during a merchant rename, preserving transaction details', async () => {
+  await adapter.updatePayees(['sms-one', 'sms-two'], 'Air Arabia');
+  expect(sdk.updateTransaction.mock.calls).toEqual([
+    ['sms-one', { payee: 'existing-payee' }],
+    ['sms-two', { payee: 'existing-payee' }],
+  ]);
+  expect(sdk.createPayee).not.toHaveBeenCalled();
+});

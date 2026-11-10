@@ -314,8 +314,10 @@
             <strong>Run the inbox sync</strong>
             <p>
               Run “Sync SMS Inbox To Actual Budget” once. The project then syncs every five minutes.
-              It continues from your saved checkpoint. New checkpoints default to now; choose an
-              earlier date above to include older messages.
+              It only sends SMS from the bank sender aliases configured for your accounts. Reimport
+              the latest project to apply phone-side filtering. It continues from your saved
+              checkpoint. New checkpoints default to now; choose an earlier date above to include
+              older messages.
             </p>
           </li>
           <li>

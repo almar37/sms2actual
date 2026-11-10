@@ -81,6 +81,8 @@ The image includes the bank registry and shared grammar. After editing these fil
 
 ## Custom SMS templates
 
+For a message marked **Unsupported format** in the web inbox, use **Teach this format** to select exact SMS fields, validate the rule, save it, and import that message. Those learned templates are stored in SQLite and can be edited in **Message templates**. The YAML configuration below is for maintaining shared bank grammar.
+
 All banks share one parser engine and a set of English/Arabic rules in `config/parsing.yaml`. Bank identification is a separate step used for routing. The parser reads transaction details; routing and processing handle account matching and transfers between your own accounts.
 
 You can add a template when a bank uses wording the shared rules don't recognize. Add it under `templates` in `config/parsing.yaml`, then reference its ID on the bank entry in `config/banks.yaml` with `templates: [example-purchase]`.
@@ -114,7 +116,7 @@ Templates work as follows:
 
 Supported fields are `accountAlias`, `accountAliases`, `from`, `to`, `iban`, `beneficiary`, `biller`, `merchant`, `principal`, `total`, `fee`, `balance`, `foreign`, `date`, `sarEquivalent`, and the boolean marker `cashback`. Amount fields describe SAR amounts; foreign amounts are stored separately. Dates use the supported formats and Riyadh timezone, falling back to the time the SMS was received. YAML templates can't run custom conversion code or accounting formulas.
 
-Ignored notifications and review-only banks are handled before template matching. With exactly one matching template, the service uses its transaction kind and field overrides. With none, it uses the shared rules. Missing or invalid required fields send the message to `needs_review`; multiple matching templates do the same with reason `ambiguous_template`. Purchase, refund, transfer, and fee accounting stays in the shared engine.
+Ignored notifications and review-only banks are handled before template matching. With exactly one matching template, the service uses its transaction kind and field overrides. With none, it uses the shared rules. Missing or invalid required fields send the message to `unsupported_format`; multiple matching templates do the same with reason `ambiguous_template`. Purchase, refund, transfer, and fee accounting stays in the shared engine.
 
 Test new templates against both messages they should match and messages they shouldn't. Restart after edits, and deploy bank and parser configuration together. Setup and startup validate the parser configuration and bank template references. Invalid versions, fields, flags, regexes, captures, or references are rejected.
 

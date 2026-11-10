@@ -62,6 +62,14 @@ const reviewTransferEvent = store.enqueue({
 });
 store.update(reviewTransferEvent.id, 'needs_review', { parserReason: 'unrecognized_template' });
 
+const learnableMessage = 'Receipt shop=Coffee; charged=25.50 SAR; card=1234; available=900.00';
+const learnableEvent = store.enqueue({
+  sender: 'SAB',
+  message: learnableMessage,
+  receivedAt: '2026-11-06T10:00:00+03:00',
+});
+store.update(learnableEvent.id, 'unsupported_format', { parserReason: 'unrecognized_template' });
+
 for (let i = 0; i < 9; i++) {
   const input = {
     eventId: `demo-${i}`,
@@ -431,10 +439,46 @@ try {
   });
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: learnableMessage, exact: true }).click();
+  const teaching = page.locator('.learn-format');
+  await teaching
+    .getByRole('textbox', { name: 'Format name', exact: true })
+    .fill('Learned receipts');
+  await teaching
+    .getByRole('combobox', { name: 'Format action', exact: true })
+    .selectOption('purchase');
+  const merchantSelection = teaching.getByRole('textbox', { name: /^Merchant identifier/ });
+  await merchantSelection.fill('Imaginary shop');
+  await expect(merchantSelection).toHaveAttribute('aria-invalid', 'true');
+  await expect(teaching).toContainText('Select an actual part of the received SMS text.');
+  await page.screenshot({
+    path: `${artifactDir}/unsupported-format.png`,
+    fullPage: true,
+    animations: 'disabled',
+  });
+  const smsText = teaching.getByRole('textbox', { name: 'Received SMS — select a value' });
+  await smsText.evaluate((element: HTMLTextAreaElement) => {
+    const start = element.value.indexOf('Coffee');
+    element.setSelectionRange(start, start + 6);
+    element.dispatchEvent(new Event('select', { bubbles: true }));
+  });
+  await teaching.getByRole('combobox', { name: 'Selected SMS field' }).selectOption('merchant');
+  await teaching.getByRole('button', { name: 'Use selected text' }).click();
+  await expect(merchantSelection).toHaveValue('Coffee');
+  await expect(merchantSelection).toHaveAttribute('aria-invalid', 'false');
+  await teaching.getByRole('textbox', { name: 'Amount', exact: true }).fill('25.50');
+  await teaching.getByRole('textbox', { name: /^Account \/ card suffix/ }).fill('1234');
+  await teaching.getByRole('textbox', { name: /^Balance/ }).fill('900.00');
+  await teaching.getByRole('button', { name: 'Learn format & import' }).click();
+  await expect(page.getByRole('status')).toContainText('Format learned.');
+  expect(store.get(learnableEvent.id)?.status).toBe('queued');
+  expect(settings.templates().find((t) => t.name === 'Learned receipts')?.pattern).toBe(
+    'Receipt shop={merchant}; charged={amount} SAR; card={suffix}; available={balance}',
+  );
   await page.getByRole('link', { name: 'Merchants', exact: true }).click();
   await page.getByRole('button', { name: 'Add merchant' }).click();
   await page.getByLabel('Merchant text from SMS').fill('COFFEE HOUSE');
-  await page.getByLabel('Display payee').fill('Coffee House');
+  await page.getByLabel('Preferred name / payee').fill('Coffee House');
   await page.getByRole('combobox', { name: /^Account/ }).selectOption('checking');
   await page.getByRole('combobox', { name: /^Category/ }).selectOption('food');
   await page.getByRole('button', { name: 'Save merchant' }).click();
@@ -611,7 +655,7 @@ try {
   await expect(page.getByRole('status')).toContainText(`Cleared ${messagesBeforeReset} messages`);
   expect(store.list({ limit: 50 })).toEqual([]);
   expect(store.inboxCheckpoint()!.date).toBeGreaterThanOrEqual(resetStarted);
-  expect(settings.templates()).toHaveLength(1);
+  expect(settings.templates()).toHaveLength(2);
   expect(settings.ai().provider).toBe('openai');
   await page.getByRole('link', { name: 'SMS inbox', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Your inbox is ready.' })).toBeVisible();
@@ -660,7 +704,7 @@ try {
   await expect(page.getByRole('heading', { name: 'Everything, in sync.' })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
-    `Browser smoke passed: owner setup, login, account/card save, SMS review, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, confirmed SMS/log reset, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
+    `Browser smoke passed: owner setup, login, account/card save, SMS review, validated format learning, merchant edit, template preview/save, AI settings, Tasker checkpoint selection/download, confirmed SMS/log reset, sessions, password change, password-only sign-in, logout, Actual refresh/recovery, themes and mobile layout. Screenshots: ${artifactDir}`,
   );
 } finally {
   await browser?.close();

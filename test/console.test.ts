@@ -2101,3 +2101,246 @@ it('reveals Tasker credentials only to an authenticated same-origin request', as
   expect((await app.inject({ url: '/api/console/settings', headers })).body).not.toContain(token);
   await app.close();
 });
+
+describe('merchant identifiers and preferred names', () => {
+  it('keeps exact SMS identifiers, defaults the name, and applies a name without requiring a category', async () => {
+    const { app, headers, store, processor, imports } = await server();
+    const id = store.enqueue({
+      sender: 'SAB',
+      message: 'SAB purchase Card **1234 Amount SAR 25 at COFFEE-HOUSE on 2026-11-05 10:00',
+      receivedAt: now,
+    }).id;
+    await processor.tick();
+    expect(store.merchantProfile('checking', 'COFFEE-HOUSE')).toMatchObject({
+      merchant: 'COFFEE-HOUSE',
+      payee: 'COFFEE-HOUSE',
+      renamed: 0,
+    });
+    const list = (await app.inject({ url: '/api/console/merchants', headers })).json().merchants;
+    expect(list).toContainEqual(
+      expect.objectContaining({ merchant: 'COFFEE-HOUSE', payee: 'COFFEE-HOUSE' }),
+    );
+    const saved = await app.inject({
+      method: 'PUT',
+      url: '/api/console/merchants',
+      headers,
+      payload: { accountId: 'checking', merchant: 'COFFEE-HOUSE', payee: 'My coffee place' },
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    store.enqueue({
+      sender: 'SAB',
+      message: 'SAB purchase Card **1234 Amount SAR 30 at COFFEE-HOUSE on 2026-11-06 10:00',
+      receivedAt: now,
+    });
+    await processor.tick();
+    expect(imports.mock.calls.at(-1)?.[1][0]).toMatchObject({
+      payee_name: 'My coffee place',
+      imported_payee: 'COFFEE-HOUSE',
+    });
+    expect(JSON.parse(store.get(id)!.parsed!).payee).toBe('COFFEE-HOUSE');
+    await app.close();
+  });
+  it('updates only ordinary service-imported payees in the selected account', async () => {
+    const { app, headers, actual, store } = await server();
+    actual.updatePayees = vi.fn(async () => {});
+    actual.transactions = vi.fn(async () => [
+      {
+        id: 'own',
+        importedId: 'sms:one',
+        importedPayee: 'COFFEE-HOUSE',
+        payeeName: 'Old',
+        accountId: 'checking',
+        date: '2026-11-05',
+      },
+      {
+        id: 'other',
+        importedId: 'sms:two',
+        importedPayee: 'Other store',
+        accountId: 'checking',
+        date: '2026-11-05',
+      },
+      { id: 'manual', importedPayee: 'COFFEE-HOUSE', accountId: 'checking', date: '2026-11-05' },
+      {
+        id: 'transfer',
+        importedId: 'sms:three',
+        importedPayee: 'COFFEE-HOUSE',
+        transferId: 'linked',
+        accountId: 'checking',
+        date: '2026-11-05',
+      },
+      {
+        id: 'split',
+        importedId: 'sms:four',
+        importedPayee: 'COFFEE-HOUSE',
+        isSplit: true,
+        accountId: 'checking',
+        date: '2026-11-05',
+      },
+    ]);
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/console/merchants',
+      headers,
+      payload: {
+        accountId: 'checking',
+        merchant: 'COFFEE-HOUSE',
+        payee: 'Coffee',
+        categoryId: 'food',
+      },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().updated).toBe(1);
+    expect(actual.updatePayees).toHaveBeenCalledWith(['own'], 'Coffee');
+    expect(store.merchantProfile('checking', 'COFFEE-HOUSE')?.payee).toBe('Coffee');
+    actual.updatePayees = vi.fn(async () => {
+      throw new Error('Actual unavailable');
+    });
+    const failed = await app.inject({
+      method: 'PUT',
+      url: '/api/console/merchants',
+      headers,
+      payload: { accountId: 'checking', merchant: 'COFFEE-HOUSE', payee: 'New' },
+    });
+    expect(failed.statusCode).toBe(409);
+    expect(store.merchantProfile('checking', 'COFFEE-HOUSE')?.payee).toBe('Coffee');
+    await app.close();
+  });
+});
+
+describe('learn unsupported SMS formats', () => {
+  const message = 'Receipt shop=Coffee; charged=25.50 SAR; card=1234; available=900.00';
+  const selections = {
+    merchant: { value: 'Coffee' },
+    amount: { value: '25.50' },
+    suffix: { value: '1234' },
+    balance: { value: '900.00' },
+  };
+  it('learns and imports the original SMS and future matching messages through the durable queue', async () => {
+    const { app, headers, store, processor, settings, imports } = await server();
+    const id = store.enqueue({ sender: 'SAB', message, receivedAt: now }).id;
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('unsupported_format');
+    const filtered = await app.inject({
+      url: '/api/console/events?status=unsupported_format',
+      headers,
+    });
+    expect(filtered.json().events).toHaveLength(1);
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/console/events/${id}/learn`,
+      headers,
+      payload: { name: 'Receipts', kind: 'purchase', selections, categoryId: 'food' },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(settings.templates()[0]?.pattern).toBe(
+      'Receipt shop={merchant}; charged={amount} SAR; card={suffix}; available={balance}',
+    );
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('imported');
+    expect(imports.mock.calls[0]?.[1][0]).toMatchObject({
+      amount: -2550,
+      imported_payee: 'Coffee',
+      category: 'food',
+    });
+    store.saveMerchantName('checking', 'Bakery', 'My bakery');
+    store.enqueue({
+      sender: 'SAB',
+      message: message
+        .replace('Coffee', 'Bakery')
+        .replace('25.50', '40.00')
+        .replace('900.00', '860.00'),
+      receivedAt: now,
+    });
+    await processor.tick();
+    expect(imports.mock.calls.at(-1)?.[1][0]).toMatchObject({
+      amount: -4000,
+      payee_name: 'My bakery',
+      category: 'food',
+    });
+    expect(imports).toHaveBeenCalledTimes(2);
+    await app.close();
+  });
+  it('rejects invalid selections and unsafe rules without saving or queuing anything', async () => {
+    const { app, headers, store, processor, settings, imports } = await server();
+    const id = store.enqueue({ sender: 'SAB', message, receivedAt: now }).id;
+    await processor.tick();
+    for (const bad of [
+      { ...selections, merchant: { value: 'Imaginary' } },
+      { ...selections, amount: { value: '25.50', start: 0 } },
+      { ...selections, merchant: { value: 'Coffee; charged=25.50' } },
+      { ...selections, amount: { value: 'Coffee' } },
+      { ...selections, suffix: undefined },
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/console/events/${id}/learn`,
+        headers,
+        payload: { name: 'Unsafe', kind: 'purchase', selections: bad },
+      });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(settings.templates()).toHaveLength(0);
+      expect(store.get(id)?.status).toBe('unsupported_format');
+    }
+    expect(imports).not.toHaveBeenCalled();
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/console/events/${id}/learn`,
+          headers: { origin },
+          payload: { name: 'Unsafe', kind: 'purchase', selections },
+        })
+      ).statusCode,
+    ).toBe(401);
+    await app.close();
+  });
+  it('only exposes configured bank senders to Tasker, and fails closed before routing setup', async () => {
+    const { app, config, store } = await server();
+    const start = await app.inject({
+      method: 'POST',
+      url: '/v1/inbox-sync/start',
+      headers: { 'x-api-key': apiKey },
+      payload: {},
+    });
+    expect(start.json().senders).toEqual(banks.find((b) => b.id === 'sab')!.senders);
+    expect(start.json().senderFilter).toContain('LOWER(TRIM(address)) IN');
+    store.db.exec(
+      "CREATE TEMP TABLE phone_inbox(address TEXT); INSERT INTO phone_inbox VALUES('sAb'),('SAB'),('Private contact'),('Unknown sender');",
+    );
+    expect(
+      store.db.prepare(`SELECT address FROM phone_inbox WHERE ${start.json().senderFilter}`).all(),
+    ).toEqual([{ address: 'sAb' }, { address: 'SAB' }]);
+    config.accounts = [];
+    const empty = await app.inject({
+      method: 'POST',
+      url: '/v1/inbox-sync/start',
+      headers: { 'x-api-key': apiKey },
+      payload: {},
+    });
+    expect(empty.json()).toMatchObject({ senders: [], senderFilter: '1=0' });
+    await app.close();
+  });
+});
+
+it('does not let a learned format override an ignored OTP', async () => {
+  const { app, settings, store, processor, imports } = await server();
+  settings.set('templates', [
+    {
+      id: 'otp-overlap',
+      name: 'Unsafe receipt',
+      bank: 'sab',
+      kind: 'purchase',
+      pattern: 'Verification code {amount}',
+      enabled: true,
+    },
+  ]);
+  const id = store.enqueue({
+    sender: 'SAB',
+    message: 'Verification code 1234',
+    receivedAt: now,
+  }).id;
+  await processor.tick();
+  expect(store.get(id)).toMatchObject({ status: 'ignored', parser_reason: 'otp_or_login' });
+  expect(imports).not.toHaveBeenCalled();
+  await app.close();
+});

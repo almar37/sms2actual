@@ -91,6 +91,17 @@ export class ActualApiAdapter implements ActualAdapter {
       isSplit: Boolean(transaction.is_parent || transaction.parent_id),
     }));
   }
+  async updatePayees(transactionIds: string[], payeeName: string) {
+    if (!transactionIds.length) return;
+    const actual = await loadActualApi();
+    const payees = await actual.getPayees();
+    const payee =
+      payees.find((p) => !p.transfer_acct && p.name === payeeName)?.id ??
+      (await actual.createPayee({ name: payeeName }));
+    await actual.batchBudgetUpdates(async () => {
+      for (const id of transactionIds) await actual.updateTransaction(id, { payee });
+    });
+  }
   async updateTransactions(updates: ActualTransactionUpdate[]) {
     const actual = await loadActualApi();
     const payees = await actual.getPayees();

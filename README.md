@@ -27,7 +27,7 @@ No `.env`, account YAML, CLI wizard, or manually generated API key is required. 
 
 Messages remain queued until Actual and account routing are configured. The web UI stays available if the saved Actual connection fails; use **Settings → Actual server connection** to reconnect or change credentials. A different budget after imports requires a separate instance so message deduplication and audit history remain tied to the original budget.
 
-Tasker starts from your saved checkpoint and checks every five minutes. Without a saved checkpoint, its first sync starts from the current time. Check **SMS inbox** for imported messages or messages needing review. Repeated inbox syncs use stable identifiers to prevent duplicate imports.
+Tasker starts from your saved checkpoint and checks every five minutes. The current project queries only sender aliases belonging to the banks configured in your account routing; reimport the updated project if your old copy uploaded the whole inbox. Without a saved checkpoint, its first sync starts from the current time. Check **SMS inbox** for imported messages or messages needing review. Repeated inbox syncs use stable identifiers to prevent duplicate imports.
 
 ## Remote access and Docker networking
 
@@ -98,12 +98,14 @@ For LAN access without a proxy, set `BIND_ADDRESS` to the host's LAN IP, `PUBLIC
 ## Your web workspace
 
 - **Overview:** balances, recent transactions, message counts, and Tasker contact status. Refresh waits for Actual to sync, then reloads balances, transactions, and account/category details. It also refreshes automatically every 30 seconds. Date cutoffs use Riyadh time to include today's SMS transactions after midnight; a failed sync shows an error while keeping the previous overview visible.
-- **SMS inbox:** original messages, processing history, filters, and manual review. Messages needing review suggest recognizable bank/account, action, amount, fees, payee, and date; check those details, edit the prefilled notes, and fill any gaps before approving. An ambiguous account stays unselected. External transfers accept a category shared by the payment and its fees. Open an imported message to load its current Actual transaction, then use **Save to Actual** to update its payee, category, amount, account, date, or notes without reimporting.
+- **SMS inbox:** original messages, processing history, filters, and manual review. Messages marked **Unsupported format** include a teaching form: select values in the original SMS or enter them exactly, choose an action, and select **Learn format & import**. Missing text turns the field red; repeated values need an explicit selection. The service validates the rule and account route, saves the format, and queues the original message. Future matching messages use the learned format. Messages needing review suggest recognizable bank/account, action, amount, fees, payee, and date; check those details, edit the prefilled notes, and fill any gaps before approving. An ambiguous account stays unselected. External transfers accept a category shared by the payment and its fees. Open an imported message to load its current Actual transaction, then use **Save to Actual** to update its payee, category, amount, account, date, or notes without reimporting.
 - **Accounts & cards:** account and card suffixes, transfer identifiers, credit limits, and default repayment accounts.
 - **Merchants and templates:** remember category corrections and teach unfamiliar message formats.
 - **AI categorization:** optional OpenCode Go, OpenAI, or Anthropic credentials and model settings. History is checked before AI is called.
 - **Tasker connection:** choose where SMS sync starts, move the saved checkpoint backward or forward, download the configured Android project, reveal its SMS key, or replace that credential.
 - **Settings:** Actual connection, password changes, browser sessions, and a confirmed hard reset for local SMS and logs.
+
+In **Your merchants**, the exact SMS identifier and preferred name are separate. New merchants start with the SMS text as their name, even without a category. Changing the preferred name updates the payee on matching ordinary SMS imports in that account and on future imports, including imports with a template category. Other transaction fields are preserved; linked transfers and split transactions keep their existing payees.
 
 The Tasker key is separate from any optional legacy `.env` `API_KEY`. It can submit SMS and sync the inbox. Replacing it requires downloading and importing a new Tasker project. Normal UI setup does not need the legacy key.
 

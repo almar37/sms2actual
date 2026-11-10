@@ -102,6 +102,7 @@ export class MerchantResolver {
     if (repair && !repair.merchant_key) return undefined;
     const description = repair?.merchant ?? originalDescription;
     if (!description || merchantReviewReason(description)) return undefined;
+    this.store.observeMerchant(transaction.accountId, description);
     const serviceImport =
       transaction.importedId?.startsWith('sms:') || transaction.importedId?.startsWith('sms-edit:');
     if (serviceImport && transaction.importedId) {

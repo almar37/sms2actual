@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { fromNodeHeaders } from 'better-auth/node';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
@@ -16,6 +16,7 @@ import {
   consoleSettingsSchema,
   aiSettingsSchema,
   templateSchema,
+  templateDateFormatSchema,
   compileMessageTemplate,
   matchMessageTemplate,
   actionSchema,
@@ -26,12 +27,13 @@ import { merchantKey } from './merchant-resolver.js';
 import { merchantReviewReason } from './merchant-identity.js';
 import { extractReviewDraft, parseSms } from './parser.js';
 import { resolveSmsSource } from './sms-source.js';
-import { resolveTransferTarget } from './routing.js';
+import { resolveAccount, resolveTransferTarget } from './routing.js';
 import { generateTaskerProject } from './tasker-export.js';
 import { currentBudgetDate } from './budget-date.js';
 import { actualConnectionSchema, type ActualConnection } from './actual-connection.js';
 import { readMessageActual, saveMessageActual, type MessageActualState } from './message-sync.js';
 import { transactionNotes } from './transaction-notes.js';
+import { patternFromSelections, selectionFields } from './template-selection.js';
 
 export interface ConsoleOptions {
   auth: ConsoleAuth;
@@ -279,6 +281,7 @@ export function registerConsole(
             'imported',
             'ignored',
             'needs_review',
+            'unsupported_format',
             'imported_review',
             'failed',
           ])
@@ -338,7 +341,7 @@ export function registerConsole(
     }
     const input = readJson(event.payload) as SmsInput | null;
     const reviewDraft =
-      event.status === 'needs_review' && input
+      ['needs_review', 'unsupported_format'].includes(event.status) && input
         ? extractReviewDraft(
             input.message,
             input.receivedAt,
@@ -555,19 +558,157 @@ export function registerConsole(
     void processor.tick();
     return { ok: true };
   });
-  app.get('/api/console/merchants', async () => ({
-    merchants: (
-      store.db
-        .prepare('SELECT * FROM merchant_mappings ORDER BY payee,account_id')
-        .all() as import('./db.js').MerchantMapping[]
-    ).map((mapping) => ({
-      ...mapping,
-      reviewReason:
-        mapping.review_reason ??
-        merchantReviewReason(mapping.merchant_key) ??
-        (mapping.source === 'ai' ? 'AI suggestion — confirm before reuse' : undefined),
-    })),
-  }));
+  app.post<{ Params: { id: string } }>('/api/console/events/:id/learn', async (req, reply) => {
+    const event = store.get(req.params.id);
+    if (!event?.payload) return reply.code(404).send({ error: 'Original SMS is unavailable' });
+    if (
+      event.status !== 'unsupported_format' &&
+      !(
+        event.status === 'needs_review' &&
+        ['unrecognized_template', 'malformed_notification'].includes(event.parser_reason ?? '')
+      )
+    )
+      return reply
+        .code(409)
+        .send({ error: 'Only an unsupported format can be taught from this message' });
+    const body = z
+      .object({
+        name: z.string().trim().min(1).max(100),
+        kind: actionSchema,
+        categoryId: z.string().optional(),
+        dateFormat: templateDateFormatSchema.optional(),
+        selections: z.record(
+          z.enum(selectionFields),
+          z
+            .object({
+              value: z.string().min(1).max(4000),
+              start: z.number().int().nonnegative().optional(),
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success)
+      return reply.code(400).send({ error: 'Select the SMS fields and a transaction action' });
+    const input = JSON.parse(event.payload) as SmsInput;
+    try {
+      const source = resolveSmsSource(input.sender ?? '', input.message, options.config.banks);
+      if (source.type === 'unsupported')
+        throw new Error('Choose a supported bank sender before teaching a format');
+      if (!(await validateCategory(body.data.categoryId)))
+        throw new Error('Choose an existing category');
+      const selections = body.data.selections;
+      if (['purchase', 'refund'].includes(body.data.kind) && !selections.merchant)
+        throw new Error('Select the merchant text from the SMS');
+      if (
+        selections.fee &&
+        !['transfer_in', 'transfer_out', 'card_payment'].includes(body.data.kind)
+      )
+        throw new Error(
+          'Separate fees are supported on transfers and card payments. For other actions, select the full charged amount.',
+        );
+      const template = templateSchema.parse({
+        id: randomUUID(),
+        name: body.data.name,
+        bank: source.bank,
+        kind: body.data.kind,
+        pattern: patternFromSelections(input.message, selections),
+        dateFormat: body.data.dateFormat,
+        sample: input.message,
+        sender: input.sender,
+        categoryId: body.data.categoryId,
+      });
+      const transaction = matchMessageTemplate(
+        template,
+        input.message,
+        input.receivedAt,
+        source.bank,
+      );
+      if (!transaction) throw new Error('The selected fields do not safely match this SMS');
+      if (
+        merchantReviewReason(transaction.payee) &&
+        ['purchase', 'refund'].includes(transaction.kind)
+      )
+        throw new Error('Select only the merchant description, without dates or amounts');
+      if (!resolveAccount(options.config.accounts, transaction))
+        throw new Error(
+          'Select the account/card suffix from the SMS and configure its account routing',
+        );
+      const conflicting = options.settings
+        .templates()
+        .some((t) => matchMessageTemplate(t, input.message, input.receivedAt, source.bank));
+      if (conflicting)
+        throw new Error('An active template already matches this SMS. Edit that template instead.');
+      // Recheck after asynchronous validation; the event may have been approved in another tab.
+      const current = store.get(event.id)!;
+      if (current.status !== event.status)
+        return reply
+          .code(409)
+          .send({ error: 'This message changed. Reopen it before teaching the format.' });
+      store.db.transaction(() => {
+        options.settings.set('templates', [...options.settings.templates(), template]);
+        store.update(event.id, 'queued', { attempts: 0, nextAttemptAt: new Date().toISOString() });
+        store.db
+          .prepare(
+            'INSERT INTO event_history(event_id,from_status,to_status,details,created_at) VALUES(?,?,?,?,?)',
+          )
+          .run(
+            event.id,
+            'queued',
+            'queued',
+            JSON.stringify({ learnedFormat: { templateId: template.id, selections } }),
+            new Date().toISOString(),
+          );
+      })();
+      void processor.tick();
+      return { ok: true, template, transaction };
+    } catch (error) {
+      return reply
+        .code(400)
+        .send({ error: error instanceof Error ? error.message : 'Could not learn this format' });
+    }
+  });
+  app.get('/api/console/merchants', async () => {
+    store.seedMerchantProfiles(options.config.accounts);
+    const mappings = store.db
+      .prepare('SELECT * FROM merchant_mappings')
+      .all() as import('./db.js').MerchantMapping[];
+    const profiles = store.db
+      .prepare('SELECT * FROM merchant_profiles')
+      .all() as import('./db.js').MerchantProfile[];
+    const keys = new Map(
+      [...mappings, ...profiles].map((m) => [JSON.stringify([m.account_id, m.merchant_key]), m]),
+    );
+    const mappingIndex = new Map(
+      mappings.map((m) => [JSON.stringify([m.account_id, m.merchant_key]), m]),
+    );
+    const profileIndex = new Map(
+      profiles.map((m) => [JSON.stringify([m.account_id, m.merchant_key]), m]),
+    );
+    return {
+      merchants: [...keys.entries()]
+        .map(([id, key]) => {
+          const mapping = mappingIndex.get(id);
+          const profile = profileIndex.get(id);
+          return {
+            ...mapping,
+            ...key,
+            merchant: profile?.merchant ?? key.merchant_key,
+            payee: profile?.renamed
+              ? profile.payee
+              : ((mapping?.source !== 'ai' ? mapping?.payee : undefined) ??
+                profile?.payee ??
+                key.merchant_key),
+            reviewReason:
+              mapping?.review_reason ??
+              merchantReviewReason(key.merchant_key) ??
+              (mapping?.source === 'ai' ? 'AI suggestion — confirm before reuse' : undefined),
+          };
+        })
+        .sort((a, b) => (a.payee ?? '').localeCompare(b.payee ?? '')),
+    };
+  });
   app.post('/api/console/merchants/recheck', async (_req, reply) => {
     if (processor.isBusy())
       return reply
@@ -581,7 +722,7 @@ export function registerConsole(
         accountId: z.string(),
         merchant: z.string().trim().min(1).max(200),
         payee: z.string().trim().min(1).max(100),
-        categoryId: z.string(),
+        categoryId: z.string().optional(),
       })
       .strict()
       .safeParse(req.body);
@@ -594,19 +735,65 @@ export function registerConsole(
       });
     if (
       !(await options.actual.accounts()).some((a) => a.id === b.accountId) ||
-      !b.categoryId ||
       !(await validateCategory(b.categoryId))
     )
       return reply.code(400).send({ error: 'Choose an existing account and category' });
-    store.putLocalMapping({
-      account_id: b.accountId,
-      merchant_key: merchantKey(b.merchant),
-      payee: b.payee,
-      category_id: b.categoryId,
-      source_ref: `console:${b.accountId}:${merchantKey(b.merchant)}`,
-      decision_at: new Date().toISOString(),
-    });
-    return { ok: true };
+    try {
+      const updated = await processor.withActualAccess(async () => {
+        const ids: string[] = [];
+        if (options.actual.updatePayees) {
+          await options.actual.sync();
+          const history = await options.actual.transactions(
+            b.accountId,
+            '1900-01-01',
+            currentBudgetDate(),
+          );
+          for (const tx of history) {
+            if (!tx.importedId?.startsWith('sms:') && !tx.importedId?.startsWith('sms-edit:'))
+              continue;
+            const description = tx.importedPayee;
+            const repair = description
+              ? store.merchantRepair(b.accountId, merchantKey(description))
+              : undefined;
+            if (
+              description &&
+              merchantKey(repair?.merchant ?? description) === merchantKey(b.merchant) &&
+              !tx.transferId &&
+              !tx.transferAccountId &&
+              !tx.isSplit &&
+              tx.payeeName !== b.payee
+            )
+              ids.push(tx.id);
+          }
+          if (ids.length) await options.actual.updatePayees(ids, b.payee);
+          await options.actual.sync();
+        }
+        store.db.transaction(() => {
+          store.saveMerchantName(b.accountId, b.merchant, b.payee);
+          const previous = store.mapping(b.accountId, merchantKey(b.merchant));
+          const categoryId =
+            b.categoryId ||
+            (previous?.source !== 'ai' && !previous?.review_reason
+              ? previous?.category_id
+              : undefined);
+          if (categoryId)
+            store.putLocalMapping({
+              account_id: b.accountId,
+              merchant_key: merchantKey(b.merchant),
+              payee: b.payee,
+              category_id: categoryId,
+              source_ref: `console:${b.accountId}:${merchantKey(b.merchant)}`,
+              decision_at: new Date().toISOString(),
+            });
+        })();
+        return ids.length;
+      });
+      return { ok: true, updated };
+    } catch (error) {
+      return reply.code(409).send({
+        error: error instanceof Error ? error.message : 'Could not update the merchant payee',
+      });
+    }
   });
   app.get('/api/console/templates', async () => ({
     templates: options.settings.templates(),

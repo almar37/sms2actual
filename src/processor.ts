@@ -167,7 +167,10 @@ export class Processor {
       : undefined;
     let templateCategory: string | undefined;
     if (manual) result = { type: 'transaction', transaction: manual.transaction };
-    else if (this.consoleConfig) {
+    else if (
+      this.consoleConfig &&
+      !(result.type === 'ignored' && result.reason !== 'unsupported_sender')
+    ) {
       const source = resolveSmsSource(input.sender ?? '', input.message, this.config.banks);
       if (source.type !== 'unsupported') {
         const templates = this.consoleConfig
@@ -189,10 +192,17 @@ export class Processor {
         reason: result.type,
         parserReason: result.reason,
       });
-      this.store.update(event.id, result.type, {
-        parserReason: result.reason,
-        parserRevision: PARSER_REVISION,
-      });
+      this.store.update(
+        event.id,
+        result.type === 'needs_review' &&
+          ['unrecognized_template', 'malformed_notification'].includes(result.reason)
+          ? 'unsupported_format'
+          : result.type,
+        {
+          parserReason: result.reason,
+          parserRevision: PARSER_REVISION,
+        },
+      );
       return;
     }
     const tx = result.transaction;
@@ -241,6 +251,7 @@ export class Processor {
     const transferTarget = isTransfer ? resolveTransferTarget(this.config.accounts, tx) : undefined;
     const canCategorize = !transferTarget;
     let suggestion: AiSuggestion | null = null;
+    this.store.observeMerchant(account.id, manual?.merchant ?? tx.payee);
     let selectedPayee = tx.payee;
     let selectedCategory: string | undefined = canCategorize
       ? (manual?.categoryId ??
@@ -328,6 +339,8 @@ export class Processor {
         source_ref: `console-review:${event.id}`,
         decision_at: new Date().toISOString(),
       });
+    const profile = this.store.merchantProfile(account.id, manual?.merchant ?? tx.payee);
+    if (canCategorize && profile?.renamed && !manual) selectedPayee = profile.payee;
     if (canCategorize) tx.importCategoryId = selectedCategory ?? null;
     this.store.update(event.id, 'processing', { parsed: tx });
     const date = DateTime.fromISO(tx.occurredAt, { setZone: true }).toISODate()!;

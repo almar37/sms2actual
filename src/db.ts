@@ -3,12 +3,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import type {
   EventStatus,
   InboxCheckpoint,
+  ParsedTransaction,
   InboxSyncOutcome,
   InboxSyncRow,
   SmsInput,
 } from './types.js';
 import { normalizeText, type ParserReason } from './parser.js';
 import { merchantKey, merchantReviewReason } from './merchant-identity.js';
+import { resolveAccount } from './routing.js';
 
 export interface StoredEvent {
   id: string;
@@ -37,6 +39,14 @@ export interface MerchantMapping {
   decision_at: string;
   updated_at: string;
   review_reason?: string | null;
+}
+export interface MerchantProfile {
+  account_id: string;
+  merchant_key: string;
+  merchant: string;
+  payee: string;
+  renamed: number;
+  updated_at: string;
 }
 export interface MerchantKeyRepair {
   account_id: string;
@@ -71,6 +81,7 @@ export class EventStore {
     CREATE TABLE IF NOT EXISTS service_migrations(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS event_history(id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL,from_status TEXT,to_status TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS enrichment_attempts(id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL,status TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS merchant_profiles(account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,merchant TEXT NOT NULL,payee TEXT NOT NULL,renamed INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(account_id,merchant_key));
     CREATE TABLE IF NOT EXISTS merchant_mappings(account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,source TEXT NOT NULL,source_ref TEXT,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(account_id,merchant_key));
     CREATE TABLE IF NOT EXISTS actual_mapping_observations(actual_transaction_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,transaction_date TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS local_mapping_observations(source_ref TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -110,6 +121,15 @@ export class EventStore {
     }[];
     if (!merchantColumns.some((column) => column.name === 'review_reason'))
       this.db.exec('ALTER TABLE merchant_mappings ADD COLUMN review_reason TEXT');
+    const unsupported = this.db
+      .prepare(
+        "SELECT id,parser_reason FROM events WHERE status='needs_review' AND parser_reason IN ('unrecognized_template','malformed_notification')",
+      )
+      .all() as { id: string; parser_reason: ParserReason }[];
+    this.db.transaction(() => {
+      for (const row of unsupported)
+        this.update(row.id, 'unsupported_format', { parserReason: row.parser_reason });
+    })();
     this.backfillAudit();
   }
   enqueue(input: SmsInput): { id: string; duplicate: boolean } {
@@ -334,12 +354,12 @@ export class EventStore {
       const now = new Date().toISOString();
       const replayed = this.db
         .prepare(
-          "SELECT id,status FROM events WHERE status IN ('ignored','needs_review','queued','failed') AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
+          "SELECT id,status FROM events WHERE status IN ('ignored','needs_review','unsupported_format','queued','failed') AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
         )
         .all(revision) as { id: string; status: EventStatus }[];
       const result = this.db
         .prepare(
-          "UPDATE events SET status='queued',parser_reason=NULL,parser_revision=?,error=NULL,attempts=0,next_attempt_at=?,updated_at=? WHERE status IN ('ignored','needs_review','queued','failed') AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
+          "UPDATE events SET status='queued',parser_reason=NULL,parser_revision=?,error=NULL,attempts=0,next_attempt_at=?,updated_at=? WHERE status IN ('ignored','needs_review','unsupported_format','queued','failed') AND payload IS NOT NULL AND (parser_revision IS NULL OR parser_revision<?)",
         )
         .run(revision, now, now, revision);
       for (const event of replayed)
@@ -469,6 +489,53 @@ export class EventStore {
       | 'created_at'
       | 'updated_at'
     >[];
+  }
+  merchantProfile(accountId: string, merchant: string): MerchantProfile | undefined {
+    return this.db
+      .prepare('SELECT * FROM merchant_profiles WHERE account_id=? AND merchant_key=?')
+      .get(accountId, merchantKey(merchant)) as MerchantProfile | undefined;
+  }
+  observeMerchant(accountId: string, merchant: string) {
+    if (merchantReviewReason(merchant)) return;
+    this.db
+      .prepare(
+        'INSERT OR IGNORE INTO merchant_profiles(account_id,merchant_key,merchant,payee,updated_at) VALUES(?,?,?,?,?)',
+      )
+      .run(accountId, merchantKey(merchant), merchant, merchant, new Date().toISOString());
+  }
+  saveMerchantName(accountId: string, merchant: string, payee: string) {
+    this.db
+      .prepare(
+        `INSERT INTO merchant_profiles(account_id,merchant_key,merchant,payee,renamed,updated_at) VALUES(?,?,?,?,1,?)
+      ON CONFLICT(account_id,merchant_key) DO UPDATE SET merchant=excluded.merchant,payee=excluded.payee,renamed=1,updated_at=excluded.updated_at`,
+      )
+      .run(accountId, merchantKey(merchant), merchant, payee, new Date().toISOString());
+  }
+  /** Recover exact descriptions for existing imports without changing their immutable parsed data. */
+  seedMerchantProfiles(accounts: import('./types.js').ResolvedAccount[]) {
+    const rows = this.db.prepare('SELECT id,parsed FROM events WHERE parsed IS NOT NULL').all() as {
+      id: string;
+      parsed: string;
+    }[];
+    const hasOverrides = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE name='console_overrides'")
+      .get();
+    for (const row of rows) {
+      const tx = JSON.parse(row.parsed) as ParsedTransaction;
+      const overrideRow = hasOverrides
+        ? (this.db.prepare('SELECT value FROM console_overrides WHERE event_id=?').get(row.id) as
+            { value: string } | undefined)
+        : undefined;
+      const override = overrideRow
+        ? (JSON.parse(overrideRow.value) as { accountId?: string; merchant?: string })
+        : undefined;
+      try {
+        const accountId = override?.accountId ?? resolveAccount(accounts, tx)?.id;
+        if (accountId) this.observeMerchant(accountId, override?.merchant ?? tx.payee);
+      } catch {
+        /* Ambiguous routes cannot establish merchant identity. */
+      }
+    }
   }
   mapping(accountId: string, merchantKey: string): MerchantMapping | undefined {
     return this.db

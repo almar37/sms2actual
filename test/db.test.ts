@@ -194,3 +194,44 @@ describe('event store', () => {
     expect(s.enrichmentAttempts(id)).toHaveLength(1);
   });
 });
+
+it('migrates retained unsupported formats with audit history and preserves merchant names across restart and reset', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sms2actual-formats-'));
+  const path = join(directory, 'events.sqlite');
+  try {
+    const first = new EventStore(path);
+    const id = first.enqueue({
+      sender: 'SAB',
+      message: 'Old unsupported format',
+      receivedAt: new Date().toISOString(),
+    }).id;
+    first.update(id, 'needs_review', { parserReason: 'unrecognized_template', parserRevision: 1 });
+    first.observeMerchant('checking', 'COFFEE-HOUSE');
+    first.saveMerchantName('checking', 'COFFEE-HOUSE', 'Coffee');
+    first.close();
+    const restored = new EventStore(path);
+    try {
+      expect(restored.get(id)).toMatchObject({
+        status: 'unsupported_format',
+        parser_reason: 'unrecognized_template',
+      });
+      expect(restored.eventHistory(id).at(-1)).toMatchObject({
+        from_status: 'needs_review',
+        to_status: 'unsupported_format',
+      });
+      expect(restored.replayParserRevision(2)).toBe(1);
+      restored.observeMerchant('checking', 'COFFEE-HOUSE');
+      restored.rebuildMerchantMappings();
+      restored.resetSmsData();
+      expect(restored.merchantProfile('checking', 'COFFEE-HOUSE')).toMatchObject({
+        merchant: 'COFFEE-HOUSE',
+        payee: 'Coffee',
+        renamed: 1,
+      });
+    } finally {
+      restored.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

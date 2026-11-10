@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { api, money, when, actions, localDateInput, localDateIso } from './api.js';
   import Icon from './Icon.svelte';
+  import LearnFormat from './LearnFormat.svelte';
   let {
     catalog,
     notify,
@@ -31,6 +32,7 @@
   const statuses = [
     'all',
     'needs_review',
+    'unsupported_format',
     'failed',
     'imported',
     'imported_review',
@@ -341,91 +343,111 @@
           {#if selected.sourceBank}Source bank: {selected.sourceBank}.
           {/if}Check the suggested details and fill any missing fields before approving.
         </div>{/if}
-      <form onsubmit={submit}>
-        <div class="form-grid">
-          <label
-            >Action<select
-              bind:value={form.kind}
-              required
-              onchange={(event) => {
-                if (
-                  !['transfer_in', 'transfer_out', 'card_payment'].includes(
-                    event.currentTarget.value,
+      {#if selected.status === 'unsupported_format'}
+        <LearnFormat
+          event={selected}
+          {catalog}
+          onlearned={() => {
+            selected = null;
+            notify(
+              'Format learned. This SMS is queued for import; future matching messages will use it.',
+            );
+            void load();
+          }}
+        />
+      {/if}
+      <details open={selected.status !== 'unsupported_format'}>
+        <summary
+          >{selected.status === 'unsupported_format'
+            ? 'Approve just this message without learning'
+            : 'Transaction details'}</summary
+        >
+        <form onsubmit={submit}>
+          <div class="form-grid">
+            <label
+              >Action<select
+                bind:value={form.kind}
+                required
+                onchange={(event) => {
+                  if (
+                    !['transfer_in', 'transfer_out', 'card_payment'].includes(
+                      event.currentTarget.value,
+                    )
                   )
-                )
-                  form.fee = 0;
-              }}
-              ><option value="" disabled>Select action</option
-              >{#each actions as [value, text] (value)}<option {value}>{text}</option
-                >{/each}</select
-            ></label
-          ><label
-            >Account<select bind:value={form.accountId} required
-              ><option value="" disabled>Select account</option
-              >{#each catalog.settings.accounts as account (account.id)}<option value={account.id}
-                  >{account.name}</option
-                >{/each}</select
-            ></label
-          ><label
-            >Amount (SAR)<input
-              type="number"
-              min="0.01"
-              step="0.01"
-              bind:value={form.amount}
-              required
-            /></label
-          ><label
-            >Fees (SAR)<input
-              type="number"
-              min="0"
-              step="0.01"
-              bind:value={form.fee}
-              disabled={!transfer}
-            />{#if transfer}<small
-                >{linkedTransfer
-                  ? 'Fees use your Bank Fees category.'
-                  : 'Fees use the same category as this transaction.'}</small
-              >{/if}</label
-          ><label class="full"
-            >Payee / merchant<input bind:value={form.payee} maxlength="100" required /></label
-          >{#if transfer}<label class="full"
-              >Counterparty account<select bind:value={form.targetAccountId}
-                ><option value="">External / unknown account</option
-                >{#each catalog.accounts.filter((a: any) => a.id !== form.accountId) as account (account.id)}<option
-                    value={account.id}>{account.name}</option
-                  >{/each}</select
-              ><small>An Actual account creates a linked transfer.</small></label
-            >{/if}{#if !linkedTransfer}<label class="full"
-              >Category{imported ? ' in Actual' : ''}<select bind:value={form.categoryId}
-                ><option value="">Use merchant mapping / AI</option
-                >{#each catalog.categories as category (category.id)}<option value={category.id}
-                    >{category.name}</option
+                    form.fee = 0;
+                }}
+                ><option value="" disabled>Select action</option
+                >{#each actions as [value, text] (value)}<option {value}>{text}</option
                   >{/each}</select
               ></label
-            >{/if}<label class="full"
-            >Transaction date and time<input
-              type="datetime-local"
-              bind:value={form.date}
-              required
-            /><small>Uses your device’s time zone.</small></label
-          >
-          <label class="full"
-            >Notes<textarea bind:value={form.notes} maxlength="4000" rows="3"></textarea></label
-          >
-        </div>
-        <div class="form-actions">
-          <button type="button" onclick={makeTemplate}
-            ><Icon name="templates" size={16} />Save as template</button
-          ><button
-            class="primary"
-            disabled={busy || Boolean(imported && !selected.actualSync?.revision)}
-            >{busy ? 'Saving…' : imported ? 'Save to Actual' : 'Approve & import'}<Icon
-              name="check"
-              size={16}
-            /></button
-          >
-        </div>
-      </form>
+            ><label
+              >Account<select bind:value={form.accountId} required
+                ><option value="" disabled>Select account</option
+                >{#each catalog.settings.accounts as account (account.id)}<option value={account.id}
+                    >{account.name}</option
+                  >{/each}</select
+              ></label
+            ><label
+              >Amount (SAR)<input
+                type="number"
+                min="0.01"
+                step="0.01"
+                bind:value={form.amount}
+                required
+              /></label
+            ><label
+              >Fees (SAR)<input
+                type="number"
+                min="0"
+                step="0.01"
+                bind:value={form.fee}
+                disabled={!transfer}
+              />{#if transfer}<small
+                  >{linkedTransfer
+                    ? 'Fees use your Bank Fees category.'
+                    : 'Fees use the same category as this transaction.'}</small
+                >{/if}</label
+            ><label class="full"
+              >Payee / merchant<input bind:value={form.payee} maxlength="100" required /></label
+            >{#if transfer}<label class="full"
+                >Counterparty account<select bind:value={form.targetAccountId}
+                  ><option value="">External / unknown account</option
+                  >{#each catalog.accounts.filter((a: any) => a.id !== form.accountId) as account (account.id)}<option
+                      value={account.id}>{account.name}</option
+                    >{/each}</select
+                ><small>An Actual account creates a linked transfer.</small></label
+              >{/if}{#if !linkedTransfer}<label class="full"
+                >Category{imported ? ' in Actual' : ''}<select bind:value={form.categoryId}
+                  ><option value="">Use merchant mapping / AI</option
+                  >{#each catalog.categories as category (category.id)}<option value={category.id}
+                      >{category.name}</option
+                    >{/each}</select
+                ></label
+              >{/if}<label class="full"
+              >Transaction date and time<input
+                type="datetime-local"
+                bind:value={form.date}
+                required
+              /><small>Uses your device’s time zone.</small></label
+            >
+            <label class="full"
+              >Notes<textarea bind:value={form.notes} maxlength="4000" rows="3"></textarea></label
+            >
+          </div>
+          <div class="form-actions">
+            <button type="button" onclick={makeTemplate}
+              ><Icon name="templates" size={16} />Save as template</button
+            ><button
+              class="primary"
+              disabled={busy || Boolean(imported && !selected.actualSync?.revision)}
+              >{busy ? 'Saving…' : imported ? 'Save to Actual' : 'Approve & import'}<Icon
+                name="check"
+                size={16}
+              /></button
+            >
+          </div>
+        </form>
+      </details>
       <details>
         <summary>Processing & category support history</summary
         >{#each selected.history ?? [] as entry (entry.id)}<div class="audit-entry">

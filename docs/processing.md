@@ -4,17 +4,18 @@
 
 Use `GET /v1/events` to see what's been received and `GET /v1/events/:id` to inspect a particular message. Both require the `X-API-Key` header.
 
-| Status            | Meaning                                                          |
-| ----------------- | ---------------------------------------------------------------- |
-| `queued`          | Saved and waiting to be processed                                |
-| `processing`      | Currently being processed                                        |
-| `imported`        | Imported into Actual                                             |
-| `imported_review` | Imported, but needs your attention                               |
-| `ignored`         | Recognized as a notification that shouldn't create a transaction |
-| `needs_review`    | Saved for inspection without creating a transaction              |
-| `failed`          | Processing failed; details remain available                      |
+| Status               | Meaning                                                          |
+| -------------------- | ---------------------------------------------------------------- |
+| `queued`             | Saved and waiting to be processed                                |
+| `processing`         | Currently being processed                                        |
+| `imported`           | Imported into Actual                                             |
+| `imported_review`    | Imported, but needs your attention                               |
+| `ignored`            | Recognized as a notification that shouldn't create a transaction |
+| `unsupported_format` | Supported bank message whose fields need a learned format        |
+| `needs_review`       | Saved for inspection without creating a transaction              |
+| `failed`             | Processing failed; details remain available                      |
 
-OTP, login, declined, and insufficient-funds notifications are intentionally ignored. Unrecognized or malformed messages from registered banks, along with messages from review-only banks, are saved as `needs_review`. They don't retry within the same parser revision.
+OTP, login, declined, and insufficient-funds notifications are intentionally ignored. Unrecognized or malformed messages from supported banks are saved as `unsupported_format`. Messages from review-only banks and ambiguous template matches stay `needs_review`. They don't retry within the same parser revision.
 
 The event list has cursor pagination and optional `status`, `enrichmentStatus`, `from`, and `to` filters. Event details include the original input, status history, enrichment attempts, the source of merchant/category mappings, `parserReason`, and operational `error` values. Raw SMS and location are available only in the authenticated detail response.
 
@@ -26,7 +27,13 @@ The review form also prefills the notes the system would import. You can edit or
 
 If someone changes the transaction in Actual while the form is open, saving returns a conflict: reopen the message to load the new values. Deleted transactions and missing fee entries are never recreated automatically. Split transactions must be edited in Actual to preserve their splits. Connection changes and queue imports wait for an edit to finish. Successful category corrections are learned for future messages.
 
-When a new parser revision starts, it gives retained `ignored` and `needs_review` events from earlier revisions one more attempt. This allows a parser fix to recover a missed transaction. Already imported events are never replayed, and Actual's stable import IDs prevent duplicates.
+When a new parser revision starts, it gives retained `ignored`, `unsupported_format`, and `needs_review` events from earlier revisions one more attempt. This allows a parser fix to recover a missed transaction. Already imported events are never replayed, and Actual's stable import IDs prevent duplicates.
+
+## Teaching an unsupported format
+
+Open an `unsupported_format` message and use **Teach this format**. Select a value in the received SMS, choose its field, and press **Use selected text**, or copy the exact value into its box. The amount is required; purchases and refunds also require a merchant. Account/card suffixes route the message using your existing account rules. Include every value that changes (such as balance, fees, and dates), since all remaining wording stays fixed. When selecting a date, choose its day/month/year order and whether it includes a time; ISO and common slash formats support Arabic digits. Without a selected date, the transaction uses the SMS received time. Any changing timestamp left as fixed wording will prevent future matches.
+
+Text absent from the SMS turns its box red. Repeated strings require selecting a specific occurrence. The server independently rejects invalid offsets, overlaps, partial numbers, invalid field types, ambiguous routes, and templates already matching the example. Saving persists a literal, bounded template and queues the original SMS in one database transaction. Future matching messages follow the normal durable import flow. The rule cannot override ignored OTP or declined messages. This teaches supported bank wording; it does not enable unknown senders or review-only banks.
 
 ## How inbox sync works
 
@@ -34,7 +41,7 @@ The Tasker project reads Android's SMS inbox (`content://sms/inbox`) every five 
 
 The service supports one active inbox-sync phone. Disable the old phone's project before moving to another one. The old `%ActualSmsInboxV2*` Tasker globals are no longer used and can be deleted.
 
-Every SMS after the checkpoint passes through your private HTTPS service. The service checks the sender against `config/banks.yaml`, queues supported bank messages, and saves review-only bank messages for inspection. Unknown senders and empty messages are skipped without storing their content. Polling uses the inbox `date` as `receivedAt` and doesn't include location.
+The current Tasker project filters inbox rows on the phone using exact, case-insensitive sender aliases from `config/banks.yaml` for the banks assigned to your configured accounts. With no accounts configured, the query matches nothing. The service still validates senders and queues supported bank messages. Empty messages are skipped. Older projects queried the entire inbox; reimport the updated project to stop unrelated messages being uploaded. Previously retained messages are not automatically deleted. Polling uses the inbox `date` as `receivedAt` and doesn't include location.
 
 ### Change the checkpoint
 
@@ -50,7 +57,7 @@ The task moves the server checkpoint to seven days ago, and the next poll works 
 
 ### Protocol details
 
-Each Tasker run calls `POST /v1/inbox-sync/start` to get the checkpoint, reads all later inbox rows without filtering senders, and sends the oldest first to `POST /v1/inbox-sync/batch`. Batches contain up to 25 rows; one run sends at most 10 batches, or 250 messages. The next poll continues from there.
+Each Tasker run calls `POST /v1/inbox-sync/start` to get the checkpoint and sender filter, reads later inbox rows matching that filter, and sends the oldest first to `POST /v1/inbox-sync/batch`. Batches contain up to 25 rows; one run sends at most 10 batches, or 250 messages. The next poll continues from there.
 
 The checkpoint tracks the inbox row's `(date, _id)`. Tasker sends these identifier fields as received from Android. The server normalizes and validates them, then saves events and advances the checkpoint in the same SQLite transaction. Event IDs use `inbox-v2-<date>-<row _id>`, which also prevents duplicates when replaying messages during migration.
 
@@ -61,6 +68,8 @@ Valid rows are acknowledged as `empty`, `unsupported`, `duplicate`, or `queued`.
 The Tasker SQL query uses `|~sms~|` as its column divider. The server also accepts unsplit comma-separated rows from older imports that lost their tab divider, preserving commas and newlines within message bodies.
 
 ## Merchant names, categories, and privacy
+
+Merchant profiles retain the SMS identifier separately from a user-selected payee, including uncategorized merchants. Name changes in **Your merchants** update the payee on matching ordinary service imports in the selected account and apply to future imports independently of category selection. This preserves imported descriptions and stable IDs. Splits, linked transfers, and non-service transactions are excluded from bulk payee updates.
 
 Before asking AI for help, the service looks for an exact match on the normalized merchant name and Actual account. It learns confirmed mappings from categorized Actual transactions and your manual corrections. Explicit merchant rules and review edits take priority over Actual history. AI suggestions are saved separately for confirmation in **Your merchants** and are never reused automatically. On upgrade, old automatic SMS/AI mappings are marked as suggestions; your explicit edits remain confirmed. Actual history refreshes at startup and every hour by default. The service records the payee and category it imported, so its own unchanged imports cannot confirm an AI guess. A later payee or category correction in Actual can establish a mapping. Legacy imports without enough retained evidence remain unconfirmed. A match reuses the previous payee and category without an AI request; any active expense category can be reused.
 

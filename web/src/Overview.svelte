@@ -25,7 +25,10 @@
   const total = $derived(Object.values(counts).reduce((a, b) => a + b, 0));
   const imported = $derived((counts.imported ?? 0) + (counts.imported_review ?? 0));
   const review = $derived(
-    (counts.needs_review ?? 0) + (counts.imported_review ?? 0) + (counts.failed ?? 0),
+    (counts.unsupported_format ?? 0) +
+      (counts.needs_review ?? 0) +
+      (counts.imported_review ?? 0) +
+      (counts.failed ?? 0),
   );
   const holdings = $derived(
     (data?.accounts ?? [])

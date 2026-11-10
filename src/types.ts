@@ -1,5 +1,12 @@
 export type EventStatus =
-  'queued' | 'processing' | 'imported' | 'ignored' | 'needs_review' | 'imported_review' | 'failed';
+  | 'queued'
+  | 'processing'
+  | 'imported'
+  | 'ignored'
+  | 'needs_review'
+  | 'unsupported_format'
+  | 'imported_review'
+  | 'failed';
 
 export interface Location {
   latitude: number;
@@ -165,6 +172,7 @@ export interface ActualAdapter {
     endDate: string,
     limit?: number,
   ): Promise<HistoricalTransaction[]>;
+  updatePayees?(transactionIds: string[], payeeName: string): Promise<void>;
   updateTransactions?(updates: ActualTransactionUpdate[]): Promise<void>;
   transferPayee(accountId: string): Promise<string>;
   importTransactions(accountId: string, transactions: ActualTransaction[]): Promise<ImportResult>;

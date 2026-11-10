@@ -11,7 +11,9 @@
     error = $state('');
   const filtered = $derived(
     merchants.filter((m) =>
-      (m.payee + ' ' + m.merchant_key).toLowerCase().includes(search.toLowerCase()),
+      (m.payee + ' ' + m.merchant + ' ' + m.merchant_key)
+        .toLowerCase()
+        .includes(search.toLowerCase()),
     ),
   );
   async function load() {
@@ -25,18 +27,20 @@
     event.preventDefault();
     busy = true;
     try {
-      await api(
+      const result = await api(
         '/api/console/merchants',
         {
           accountId: form.accountId,
           merchant: form.merchant,
           payee: form.payee,
-          categoryId: form.categoryId,
+          categoryId: form.categoryId || undefined,
         },
         'PUT',
       );
       form = null;
-      notify('Merchant mapping saved for future messages.');
+      notify(
+        `Merchant saved. ${result.updated ? result.updated + ' SMS payees updated in Actual. ' : ''}Future messages will use this name.`,
+      );
       await load();
     } catch (e) {
       notify((e as Error).message);
@@ -62,14 +66,16 @@
     form = m
       ? {
           accountId: m.account_id,
-          merchant: m.merchant_key,
+          merchant: m.merchant ?? m.merchant_key,
           payee: m.payee,
-          categoryId: m.review_reason ? '' : m.category_id,
+          categoryId: m.reviewReason ? '' : (m.category_id ?? ''),
           existing: true,
+          customName: true,
         }
       : {
           accountId: catalog.accounts[0]?.id ?? '',
           merchant: '',
+          customName: false,
           payee: '',
           categoryId: '',
           existing: false,
@@ -98,7 +104,9 @@
 <div class="info-box subtle">
   <Icon name="ai" size={20} /><span
     >Confirmed merchants are checked before AI. Suggestions marked for review are not reused until
-    you confirm them. Your edits are remembered per account for future messages.</span
+    you confirm them. The SMS identifier stays separate from your preferred name. Your preferred
+    name updates matching SMS payees in Actual and applies to future messages, even when a template
+    sets the category.</span
   >
 </div>
 {#if error}<div class="error" role="alert">{error}</div>{/if}
@@ -117,9 +125,9 @@
     <table>
       <thead
         ><tr
-          ><th>Merchant / payee</th><th>Account</th><th>Category</th><th>Learned from</th><th
-            >Last updated</th
-          ><th></th></tr
+          ><th>Preferred name</th><th>SMS identifier</th><th>Account</th><th>Category</th><th
+            >Learned from</th
+          ><th>Last updated</th><th></th></tr
         ></thead
       ><tbody
         >{#each filtered as m (m.account_id + m.merchant_key)}<tr
@@ -127,23 +135,24 @@
               ><div class="payee-cell">
                 <span class="merchant-avatar">{m.payee.slice(0, 1).toUpperCase()}</span>
                 <div>
-                  <strong>{m.payee}</strong><small>{m.merchant_key}</small
-                  >{#if m.reviewReason}<small>{m.reviewReason}</small>{/if}
+                  <strong>{m.payee}</strong>{#if m.reviewReason}<small>{m.reviewReason}</small>{/if}
                 </div>
               </div></td
-            ><td
+            ><td dir="auto">{m.merchant ?? m.merchant_key}</td><td
               >{catalog.accounts.find((a: any) => a.id === m.account_id)?.name ?? m.account_id}</td
             ><td
               ><span class="tag"
                 >{catalog.categories.find((c: any) => c.id === m.category_id)?.name ??
-                  'Category unavailable'}</span
+                  'Uncategorized'}</span
               ></td
             ><td
               >{m.source === 'local'
                 ? 'Your edit'
                 : m.source === 'actual'
                   ? 'Actual history'
-                  : 'AI suggestion'}</td
+                  : m.source === 'ai'
+                    ? 'AI suggestion'
+                    : 'SMS'}</td
             ><td class="muted">{when(m.updated_at)}</td><td
               ><button onclick={() => edit(m)}>{m.reviewReason ? 'Review' : 'Edit'}</button></td
             ></tr
@@ -172,11 +181,21 @@
       <label
         >Merchant text from SMS<input
           bind:value={form.merchant}
+          oninput={(e) => {
+            if (!form.customName) form.payee = e.currentTarget.value;
+          }}
           readonly={form.existing}
           maxlength="200"
           required
         /></label
-      ><label>Display payee<input bind:value={form.payee} maxlength="100" required /></label>
+      ><label
+        >Preferred name / payee<input
+          bind:value={form.payee}
+          oninput={() => (form.customName = true)}
+          maxlength="100"
+          required
+        /></label
+      >
       <div class="form-grid">
         <label
           >Account<select bind:value={form.accountId} disabled={form.existing} required
@@ -184,8 +203,8 @@
               >{/each}</select
           ></label
         ><label
-          >Category<select bind:value={form.categoryId} required
-            ><option value="" disabled>Select category</option
+          >Category<select bind:value={form.categoryId}
+            ><option value="">Uncategorized / use AI</option
             >{#each catalog.categories.filter((c: any) => !c.isIncome) as category (category.id)}<option
                 value={category.id}>{category.name}</option
               >{/each}</select

@@ -377,12 +377,13 @@ describe('Tasker inbox project', () => {
   const readProject = (name: string) =>
     readFileSync(new URL(`../tasker/${name}`, import.meta.url), 'utf8');
 
-  it('uses server checkpoints without sender filters or persistent cursor globals', () => {
+  it('uses server checkpoints and a server-provided bank sender filter', () => {
     const project = readProject('Actual_SMS_Inbox.prj.xml');
     expect(project).toContain('%ActualSmsServiceUrl/v1/inbox-sync/start');
     expect(project).toContain('%ActualSmsServiceUrl/v1/inbox-sync/batch');
     expect(project).toContain('%ActualSmsServiceUrl/v1/inbox-sync/rewind');
-    expect(project).not.toContain('address IN');
+    expect(project).toContain('AND (%senderfilter)');
+    expect(project).toContain('response.senderFilter');
     expect(project).not.toContain('ActualSmsInboxV2');
     expect(project).not.toContain('invalid row identifier');
   });

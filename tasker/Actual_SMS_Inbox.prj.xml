@@ -99,6 +99,11 @@ if (code !== "200" || !isFinite(checkpointDate) || checkpointDate &lt; 0 || Math
   flashLong("Actual SMS sync could not fetch checkpoint: " + detail);
   exit();
 }
+if (!response.senderFilter || typeof response.senderFilter !== "string") {
+  flashLong("Actual SMS sync requires a bank sender filter. Update the service and configure your bank accounts.");
+  exit();
+}
+setLocal("%senderfilter", response.senderFilter);
 setLocal("%syncdate", String(checkpointDate));
 setLocal("%syncid", String(checkpointId));</Str>
 			<Str sr="arg1" ve="3"/>
@@ -112,7 +117,7 @@ setLocal("%syncid", String(checkpointId));</Str>
 			<Str sr="arg1" ve="3">content://sms/inbox</Str>
 			<Str sr="arg2" ve="3"/>
 			<Str sr="arg3" ve="3">_id,address,body,date</Str>
-			<Str sr="arg4" ve="3">((date &gt; %syncdate) OR (date = %syncdate AND _id &gt; %syncid))</Str>
+			<Str sr="arg4" ve="3">((date &gt; %syncdate) OR (date = %syncdate AND _id &gt; %syncid)) AND (%senderfilter)</Str>
 			<Str sr="arg5" ve="3"/>
 			<Str sr="arg6" ve="3">date ASC, _id ASC LIMIT 25</Str>
 			<Str sr="arg7" ve="3">|~sms~|</Str>

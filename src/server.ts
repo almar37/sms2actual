@@ -83,6 +83,7 @@ const eventStatusSchema = z.enum([
   'imported',
   'ignored',
   'needs_review',
+  'unsupported_format',
   'imported_review',
   'failed',
 ]);
@@ -218,7 +219,19 @@ export function buildServer(options: {
       return reply.code(202).send({ results });
     },
   );
-  app.post('/v1/inbox-sync/start', async () => ({ checkpoint: options.store.startInboxSync() }));
+  app.post('/v1/inbox-sync/start', async () => {
+    const bankIds = options.console
+      ? new Set(options.console.config.accounts.map((a) => a.match.bank))
+      : new Set(options.banks.map((b) => b.id));
+    const senders = [
+      ...new Set(options.banks.filter((b) => bankIds.has(b.id)).flatMap((b) => b.senders)),
+    ];
+    // SQL literals are escaped here; the phone uses this filter in its SMS content-provider query.
+    const senderFilter = senders.length
+      ? `LOWER(TRIM(address)) IN (${senders.map((s) => "'" + s.trim().toLowerCase().replaceAll("'", "''") + "'").join(',')})`
+      : '1=0';
+    return { checkpoint: options.store.startInboxSync(), senders, senderFilter };
+  });
   app.post<{ Body: unknown }>(
     '/v1/inbox-sync/batch',
     { bodyLimit: 5 * 1024 * 1024 },

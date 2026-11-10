@@ -2294,3 +2294,22 @@ dialog::backdrop {
     padding-right: 12px;
   }
 }
+
+input[aria-invalid='true'] {
+  border-color: #d43c3c;
+  outline-color: #d43c3c;
+  background: rgba(212, 60, 60, 0.07);
+}
+.learn-format {
+  border-block: 1px solid var(--line);
+  padding-block: 1rem;
+  margin-block: 1rem;
+}
+.learn-format pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.status-unsupported_format {
+  background: #fff0da;
+  color: #894b0b;
+}

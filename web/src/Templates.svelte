@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api, actions } from './api.js';
   import Icon from './Icon.svelte';
+  import { templateDateFormats } from '../../src/template-selection.js';
   let { catalog, notify }: { catalog: any; notify: (message: string) => void } = $props();
   let data = $state<any>({ templates: [], grammar: [], bankTemplates: [] }),
     editor = $state(false),
@@ -35,6 +36,7 @@
           categoryId: '',
           enabled: true,
         };
+    form.dateFormat ??= 'iso';
     sample = template?.sample ?? '';
     sender = template?.sender ?? '';
     preview = null;
@@ -258,6 +260,13 @@
           >
         </div>
       </div>
+      {#if form.pattern.includes('{date}')}<label
+          >Date format<select bind:value={form.dateFormat} onchange={() => (preview = null)}
+            >{#each Object.entries(templateDateFormats) as [value, label] (value)}<option {value}
+                >{label}</option
+              >{/each}</select
+          ></label
+        >{/if}
       <div class="form-grid three">
         <label
           >Bank<select bind:value={form.bank} onchange={() => (preview = null)}

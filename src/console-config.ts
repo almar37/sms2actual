@@ -3,6 +3,10 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { z } from 'zod';
 import type { EventStore } from './db.js';
 import type { ResolvedConfig, TxKind } from './types.js';
+import { templateDateFormats, type TemplateDateFormat } from './template-selection.js';
+export const templateDateFormatSchema = z.enum(
+  Object.keys(templateDateFormats) as [TemplateDateFormat, ...TemplateDateFormat[]],
+);
 
 export const actionSchema = z.enum([
   'purchase',
@@ -76,6 +80,7 @@ export const templateSchema = z
     sample: z.string().max(4000).optional(),
     sender: z.string().max(100).optional(),
     categoryId: z.string().optional(),
+    dateFormat: templateDateFormatSchema.optional(),
     enabled: z.boolean().default(true),
   })
   .strict();
@@ -244,11 +249,12 @@ export function matchMessageTemplate(
     throw new Error('Invalid template balance or fee');
   let occurredAt = receivedAt;
   if (groups.date) {
-    const date = DateTime.fromISO(groups.date.trim().replace(' ', 'T'), {
-      setZone: true,
-      zone: 'Asia/Riyadh',
-    });
-    if (!date.isValid) throw new Error('Template date is invalid; use an ISO date');
+    const value = groups.date.trim().replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632));
+    const date =
+      !template.dateFormat || template.dateFormat === 'iso'
+        ? DateTime.fromISO(value.replace(' ', 'T'), { setZone: true, zone: 'Asia/Riyadh' })
+        : DateTime.fromFormat(value, template.dateFormat, { zone: 'Asia/Riyadh' });
+    if (!date.isValid) throw new Error('Template date does not match the selected date format');
     occurredAt = date.toISO()!;
   }
   return {
