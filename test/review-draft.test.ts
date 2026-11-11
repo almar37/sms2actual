@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { extractReviewDraft, parseSms } from '../src/parser.js';
+import { extractReviewDraft, extractReviewSelections, parseSms } from '../src/parser.js';
+import { patternFromSelections, selectionError } from '../src/template-selection.js';
 import { banks, parsing } from './fixtures/banks.js';
 import { sevenGramMessage, sevenGramReceivedAt } from './fixtures/alrajhi-compact-pos.js';
 
@@ -31,10 +32,10 @@ describe('review suggestions', () => {
     expect(partial).toMatchObject({ accountAlias: '2271', payee: 'Seven Gram' });
     expect(partial.principalCents).toBeUndefined();
   });
-  it('extracts the compact Arabic transfer without authorizing automatic import', () => {
-    expect(parseSms(waterTransfer, receivedAt, banks, 'AlRajhiBank', parsing)).toEqual({
-      type: 'needs_review',
-      reason: 'unrecognized_template',
+  it('parses the compact Arabic transfer and retains review suggestions', () => {
+    expect(parseSms(waterTransfer, receivedAt, banks, 'AlRajhiBank', parsing)).toMatchObject({
+      type: 'transaction',
+      transaction: { kind: 'transfer_out', amountCents: -20029, payee: 'Ammar Shehari' },
     });
     expect(draft(waterTransfer)).toMatchObject({
       bank: 'alrajhi',
@@ -84,5 +85,52 @@ describe('review suggestions', () => {
       principalCents: -20000,
       feeCents: 29,
     });
+  });
+  it.each(['SR 125.50', '125.50 SR', '١٢٥٫٥٠ SR'])(
+    'suggests a unique %s amount and compact من account for unknown wording',
+    (amount) => {
+      const message = `تنبيه جديد ${amount}\nمن٠١٣١\nرسوم:٠٫٢٩ SR\nرصيد:٩٠٠٠ SR`;
+      expect(parseSms(message, receivedAt, banks, 'AlRajhiBank', parsing)).toMatchObject({
+        type: 'needs_review',
+      });
+      expect(draft(message)).toMatchObject({
+        accountAlias: '0131',
+        principalCents: -12550,
+        feeCents: 29,
+      });
+      const selections = extractReviewSelections(
+        message,
+        receivedAt,
+        banks,
+        'AlRajhiBank',
+        parsing,
+      );
+      expect(selections.suffix?.value).toBe('٠١٣١');
+      expect(selections.amount?.value).toBe(amount.replace(/SR\s*|\s*SR/gu, ''));
+      for (const selection of Object.values(selections))
+        expect(selectionError(message, selection)).toBeUndefined();
+      expect(patternFromSelections(message, selections)).toContain('من{suffix}');
+    },
+  );
+  it('keeps exact offsets for repeated amounts, separators, escaped newlines and Arabic digits', () => {
+    const message = 'تنبيه جديد ١٬٢٣٤٫٥٦ SR\\nمن٠١٣١\\nرسوم:٠٫٢٩ SR\\nرصيد:١٬٢٣٤٫٥٦ SR';
+    const selections = extractReviewSelections(message, receivedAt, banks, 'AlRajhiBank', parsing);
+    expect(selections.amount?.value).toBe('١٬٢٣٤٫٥٦');
+    expect(selections.balance?.value).toBe('١٬٢٣٤٫٥٦');
+    expect(selections.amount?.start).not.toBe(selections.balance?.start);
+    expect(patternFromSelections(message, selections)).toBe(
+      'تنبيه جديد {amount} SR\\nمن{suffix}\\nرسوم:{fee} SR\\nرصيد:{balance} SR',
+    );
+  });
+  it.each([
+    'Fees SR 10 Balance SR 900',
+    'Unknown 10 SR and 20 SR',
+    'Unknown -10 SR',
+    'Unknown 10.001 SR',
+  ])('does not guess a principal from ambiguous or invalid money: %s', (message) => {
+    expect(draft(message).principalCents).toBeUndefined();
+    expect(
+      extractReviewSelections(message, receivedAt, banks, 'AlRajhiBank', parsing).amount,
+    ).toBeUndefined();
   });
 });

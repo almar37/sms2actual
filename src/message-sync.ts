@@ -10,7 +10,7 @@ import type {
 } from './types.js';
 import { stableId } from './transaction-id.js';
 import { merchantKey } from './merchant-resolver.js';
-import { resolveAccount } from './routing.js';
+import { resolveAccount, resolveTransferTarget } from './routing.js';
 
 export interface MessageEdit {
   kind: TxKind;
@@ -36,15 +36,47 @@ const revision = (principal: HistoricalTransaction, fee?: HistoricalTransaction)
     .update(JSON.stringify([principal, fee ?? null]))
     .digest('hex');
 
-/** Match only recorded transaction IDs or deterministic import IDs, never merchant/amount guesses. */
-export async function readMessageActual(
-  actual: ActualAdapter,
+/** Import-time evidence also works while Actual is busy, offline, or unconfigured. */
+export function hasImportedTransfer(
   store: EventStore,
   config: ResolvedConfig,
   event: StoredEvent,
-): Promise<MessageActualState> {
-  if (!event.parsed) throw new Error('This message has no transaction details to link');
-  const tx = JSON.parse(event.parsed) as ParsedTransaction;
+): boolean {
+  const tx = event.parsed ? (JSON.parse(event.parsed) as ParsedTransaction) : undefined;
+  if (!tx || !isTransfer(tx.kind)) return false;
+  if (tx.importTransferAccountId !== undefined) return Boolean(tx.importTransferAccountId);
+  const legacyTarget = (row: StoredEvent | undefined) => {
+    if (!row?.parsed || !['imported', 'imported_review'].includes(row.status)) return false;
+    const parsed = JSON.parse(row.parsed) as ParsedTransaction;
+    if (parsed.importTransferAccountId !== undefined)
+      return Boolean(parsed.importTransferAccountId);
+    // Before import outcomes were recorded, a transfer row plus an omitted
+    // category snapshot identifies the linked branch of the importer.
+    if (parsed.importCategoryId !== undefined) return false;
+    try {
+      return Boolean(resolveTransferTarget(config.accounts, parsed));
+    } catch {
+      return false;
+    }
+  };
+  const pair = store.db
+    .prepare('SELECT matched_event_id FROM transfers WHERE event_id=?')
+    .get(event.id) as { matched_event_id: string | null } | undefined;
+  if (!pair) return false;
+  return (
+    legacyTarget(event) ||
+    Boolean(pair.matched_event_id && legacyTarget(store.get(pair.matched_event_id)))
+  );
+}
+
+export interface MessageActualSnapshot {
+  accounts: { id: string; name: string }[];
+  rows: HistoricalTransaction[];
+}
+
+export async function readMessageActualSnapshot(
+  actual: ActualAdapter,
+): Promise<MessageActualSnapshot> {
   await actual.sync();
   const accounts = await actual.accounts();
   const rows = (
@@ -52,6 +84,20 @@ export async function readMessageActual(
       accounts.map((account) => actual.transactions(account.id, '1900-01-01', '9999-12-31')),
     )
   ).flat();
+  return { accounts, rows };
+}
+
+/** Match only recorded transaction IDs or deterministic import IDs, never merchant/amount guesses. */
+export async function readMessageActual(
+  actual: ActualAdapter,
+  store: EventStore,
+  config: ResolvedConfig,
+  event: StoredEvent,
+  snapshot?: MessageActualSnapshot,
+): Promise<MessageActualState> {
+  if (!event.parsed) throw new Error('This message has no transaction details to link');
+  const tx = JSON.parse(event.parsed) as ParsedTransaction;
+  const { rows } = snapshot ?? (await readMessageActualSnapshot(actual));
   const override = store.db
     .prepare('SELECT value FROM console_overrides WHERE event_id=?')
     .get(event.id) as { value: string } | undefined;
@@ -244,6 +290,7 @@ export async function saveMessageActual(
     cardPaymentReceived: undefined,
     assumedFundingAccountId: undefined,
     importCategoryId: categoryId,
+    importTransferAccountId: linked ? edit.targetAccountId : null,
     importedFeeId: feeId,
   };
   store.db.transaction(() => {

@@ -69,6 +69,13 @@ const learnableEvent = store.enqueue({
   receivedAt: '2026-11-06T10:00:00+03:00',
 });
 store.update(learnableEvent.id, 'unsupported_format', { parserReason: 'unrecognized_template' });
+const suggestedMessage = 'تنبيه جديد ١٢٥٫٥٠ SR\nمن١٢٣٤\nرسوم:٠٫٢٩ SR\nرصيد:٩٠٠٠ SR\n11/11/26 20:08';
+const suggestedEvent = store.enqueue({
+  sender: 'SAB',
+  message: suggestedMessage,
+  receivedAt: '2026-11-11T20:10:00+03:00',
+});
+store.update(suggestedEvent.id, 'unsupported_format', { parserReason: 'unrecognized_template' });
 
 for (let i = 0; i < 9; i++) {
   const input = {
@@ -117,6 +124,26 @@ store.update(transferEvent.id, 'imported', {
     payee: 'Bank transfer',
     occurredAt: new Date().toISOString(),
     note: 'Synthetic transfer fixture',
+  },
+});
+const linkedRepaymentEvent = store.enqueue({
+  sender: 'SAB',
+  message: 'Received credit card repayment',
+  receivedAt: '2026-11-07T10:00:00+03:00',
+});
+store.update(linkedRepaymentEvent.id, 'imported', {
+  actualTransactionId: 'card-repayment',
+  parsed: {
+    bank: 'sab',
+    kind: 'transfer_in',
+    cardPaymentReceived: true,
+    accountAlias: '5678',
+    amountCents: 97323,
+    feeCents: 0,
+    payee: 'Bank transfer',
+    occurredAt: '2026-11-07T10:00:00+03:00',
+    note: 'Credit card repayment',
+    importCategoryId: null,
   },
 });
 const rejectedCategoryEvent = store.enqueue({
@@ -238,6 +265,19 @@ const actual: ActualAdapter = {
   transactions: async (id) => [
     ...editableRows.filter((row) => row.accountId === id),
     ...deletionRows.filter((row) => row.accountId === id),
+    ...(id === 'credit'
+      ? [
+          {
+            id: 'card-repayment',
+            accountId: 'credit',
+            date: '2026-11-07',
+            amount: 97323,
+            payeeName: 'Transfer from checking',
+            transferId: 'funding-repayment',
+            transferAccountId: 'checking',
+          },
+        ]
+      : []),
     ...(syncedRevision && id === 'checking'
       ? [
           {
@@ -402,6 +442,15 @@ try {
   );
   await expect(page.getByRole('button', { name: /Save to Actual/ })).toBeDisabled();
   await page.keyboard.press('Escape');
+  const repaymentRow = page.getByRole('row').filter({
+    has: page.getByRole('button', { name: 'Received credit card repayment', exact: true }),
+  });
+  await expect(repaymentRow.locator('.status')).toHaveText('imported');
+  await page.getByRole('button', { name: 'Received credit card repayment', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Review message' })).not.toContainText(
+    'category needs review',
+  );
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: reviewTransferMessage, exact: true }).click();
   const transferReview = page.getByRole('dialog', { name: 'Review message' });
   await expect(transferReview.getByRole('combobox', { name: /^Action/ })).toHaveValue(
@@ -512,6 +561,22 @@ try {
   });
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: suggestedMessage, exact: true }).click();
+  const suggestedTeaching = page.locator('.learn-format');
+  await expect(suggestedTeaching.getByRole('textbox', { name: 'Amount', exact: true })).toHaveValue(
+    '١٢٥٫٥٠',
+  );
+  await expect(
+    suggestedTeaching.getByRole('textbox', { name: /^Account \/ card suffix/ }),
+  ).toHaveValue('١٢٣٤');
+  await expect(suggestedTeaching.getByRole('textbox', { name: /^Fee/ })).toHaveValue('٠٫٢٩');
+  await expect(suggestedTeaching.getByRole('textbox', { name: /^Balance/ })).toHaveValue('٩٠٠٠');
+  await expect(suggestedTeaching.getByRole('combobox', { name: /^Date format/ })).toHaveValue(
+    'd/M/yy H:mm',
+  );
+  await expect(suggestedTeaching).toContainText('Recognized values are filled in below.');
+  expect(store.get(suggestedEvent.id)?.status).toBe('unsupported_format');
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: learnableMessage, exact: true }).click();
   const teaching = page.locator('.learn-format');
   await teaching

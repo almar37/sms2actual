@@ -74,6 +74,8 @@ export interface ParsedTransaction {
   explicitTransferAccountId?: string | null;
   /** Category sent on import; null means explicitly uncategorized, absent means not recorded. */
   importCategoryId?: string | null;
+  /** Actual import outcome, retained so linked transfers never require a category. */
+  importTransferAccountId?: string | null;
   importedFeeId?: string;
 }
 

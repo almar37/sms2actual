@@ -1,5 +1,6 @@
 import type { BankConfig, ParsedTransaction, TxKind } from './types.js';
-import type { ParserConfig } from './parsing/config.js';
+import type { CompiledFields, Field, ParserConfig } from './parsing/config.js';
+import type { TemplateSelections } from './template-selection.js';
 import {
   createExtractors,
   extractDisplayName,
@@ -13,7 +14,7 @@ import { resolveSmsSource } from './sms-source.js';
 export { normalizeText } from './parsing/extractors.js';
 
 /** Increment when a parser release should re-evaluate retained parser outcomes. */
-export const PARSER_REVISION = 17;
+export const PARSER_REVISION = 18;
 
 export type ParserReason =
   | 'otp_or_login'
@@ -38,6 +39,41 @@ function classify<T>(
   rules: readonly { value: T; patterns: readonly RegExp[] }[],
 ): T | undefined {
   return rules.find((rule) => matches(text, rule.patterns))?.value;
+}
+
+function fieldSpan(text: string, patterns: readonly RegExp[] = []) {
+  for (const pattern of patterns) {
+    const match = new RegExp(pattern.source, pattern.flags + 'd').exec(text);
+    const span = match?.indices?.groups?.value;
+    if (span) return { start: span[0], end: span[1] };
+  }
+}
+
+/** A unique currency amount can help review, but must never authorize an import. */
+function reviewAmountSpan(text: string, fields: CompiledFields) {
+  const excluded = (['fee', 'balance', 'total', 'foreign'] as const).flatMap((field) =>
+    (fields[field] ?? []).flatMap((pattern) =>
+      [...text.matchAll(new RegExp(pattern.source, pattern.flags + 'gd'))].flatMap((match) => {
+        const span = match.indices?.[0];
+        return span ? [{ start: span[0], end: span[1] }] : [];
+      }),
+    ),
+  );
+  const currency = '(?:SAR|SR|ر\\.?س\\.?)';
+  const candidates = [
+    ...text.matchAll(
+      new RegExp(
+        `(?:${currency}\\s*(?<leading>\\d+(?:\\.\\d{1,2})?)(?![\\d.])|(?<![\\d.\\-])(?<trailing>\\d+(?:\\.\\d{1,2})?)\\s*${currency})(?=\\s|[;؛]|$)`,
+        'gidu',
+      ),
+    ),
+  ].flatMap((match) => {
+    const span = match.indices?.groups?.leading ?? match.indices?.groups?.trailing;
+    return span && !excluded.some((other) => span[0] < other.end && span[1] > other.start)
+      ? [{ start: span[0], end: span[1] }]
+      : [];
+  });
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function accountReferences(text: string, kind: TxKind, e: ReturnType<typeof createExtractors>) {
@@ -225,7 +261,11 @@ export function extractReviewDraft(
     e.extractAmount(text, 'principal') ??
     e.extractSarEquivalent(text) ??
     fallback.extractAmount(text, 'principal') ??
-    (total !== undefined ? total - (fee ?? 0) : undefined);
+    (total !== undefined ? total - (fee ?? 0) : undefined) ??
+    (() => {
+      const span = reviewAmountSpan(text, config.shared.fields);
+      return span ? Math.round(Number(text.slice(span.start, span.end)) * 100) : undefined;
+    })();
   const safeMoney = (value: number | undefined) =>
     value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const amount = safeMoney(principal);
@@ -251,4 +291,77 @@ export function extractReviewDraft(
       ? e.extractDate(text, receivedAt)
       : fallback.extractDate(text, receivedAt),
   };
+}
+
+/** Exact source selections for the teaching form; every hint remains user-editable. */
+export function extractReviewSelections(
+  raw: string,
+  receivedAt: string,
+  banks: readonly BankConfig[],
+  sender: string,
+  config: ParserConfig,
+): TemplateSelections {
+  const draft = extractReviewDraft(raw, receivedAt, banks, sender, config);
+  if (!Object.keys(draft).length) return {};
+  // Retain offsets while applying the parser's digit/whitespace normalization.
+  // This preserves the exact Arabic digits, thousands separators and duplicate
+  // number occurrences in the user's original SMS.
+  const offsets: { start: number; end: number }[] = [];
+  let text = '';
+  for (const match of raw.matchAll(/\\r\\n|\\n|\\r|[\s\S]/gu)) {
+    const original = match[0],
+      start = match.index;
+    const normalized =
+      original.startsWith('\\') && original.length > 1
+        ? ' '
+        : normalizeText(normalizeMessage(original));
+    const char = normalized || (/\s/u.test(original) ? ' ' : '');
+    if (!char) continue;
+    if (char === ' ' && (!text || text.endsWith(' '))) continue;
+    text += char;
+    for (let i = 0; i < char.length; i++) offsets.push({ start, end: start + original.length });
+  }
+  text = text.trimEnd();
+  const templates = config.templates.filter(
+    (template) =>
+      banks.find((bank) => bank.id === draft.bank)?.templates?.includes(template.id) &&
+      matches(text, template.match),
+  );
+  const fields = {
+    ...config.shared.fields,
+    ...(templates.length === 1 ? templates[0]?.fields : {}),
+  };
+  const fallback = { ...config.shared.fields, ...config.shared.review?.fields };
+  const span = (field: Field) => fieldSpan(text, fields[field]) ?? fieldSpan(text, fallback[field]);
+  const selections: TemplateSelections = {};
+  const select = (
+    key: keyof TemplateSelections,
+    range: { start: number; end: number } | undefined,
+  ) => {
+    if (!range) return;
+    const start = offsets[range.start]?.start,
+      end = offsets[range.end - 1]?.end;
+    if (start === undefined || end === undefined) return;
+    if (Object.values(selections).some((s) => start < s.start! + s.value.length && end > s.start!))
+      return;
+    selections[key] = { value: raw.slice(start, end), start };
+  };
+  select('amount', span('principal') ?? span('sarEquivalent') ?? reviewAmountSpan(text, fields));
+  select('balance', span('balance'));
+  select('fee', span('fee'));
+  const alias = span(draft.kind === 'transfer_in' ? 'to' : 'from') ?? span('accountAlias');
+  if (alias && /^\d{3,6}$/u.test(text.slice(alias.start, alias.end))) select('suffix', alias);
+  if (['transfer_in', 'transfer_out', 'card_payment'].includes(draft.kind ?? '')) {
+    const counterparty = span(draft.kind === 'transfer_in' ? 'from' : 'to');
+    if (counterparty && /^\d{3,6}$/u.test(text.slice(counterparty.start, counterparty.end)))
+      select('to', counterparty);
+  }
+  select('date', span('date'));
+  if (draft.payee) {
+    const start = raw.indexOf(draft.payee);
+    // Merchant text is deliberately not normalized: preserve its exact spelling.
+    if (start >= 0 && start === raw.lastIndexOf(draft.payee))
+      selections.merchant = { value: draft.payee, start };
+  }
+  return selections;
 }

@@ -375,6 +375,11 @@ export class Processor {
         ? resolveTransferTarget(this.config.accounts, counterpartTx)
         : undefined;
       if (counterpart && counterpartTarget) {
+        tx.importTransferAccountId =
+          counterpartTarget.id === account.id
+            ? this.config.accounts.find((a) => a.key === counterpart.source_alias)?.id
+            : undefined;
+        tx.importCategoryId = undefined;
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -383,13 +388,16 @@ export class Processor {
           tx.occurredAt,
           counterpart.event_id,
         );
-        this.store.update(event.id, 'imported');
+        this.store.update(event.id, 'imported', { parsed: tx });
         return;
       }
       // A counterpart already imported without a transfer payee covers only
       // its own account. Import this side independently to avoid crediting
       // that account again through Actual's linked transfer.
       const target = counterpart ? undefined : transferTarget;
+      tx.importTransferAccountId = target?.id ?? null;
+      tx.importCategoryId = target ? undefined : (selectedCategory ?? null);
+      this.store.update(event.id, 'processing', { parsed: tx });
       if (target) {
         const payee = await this.actual.transferPayee(target.id);
         const principal =

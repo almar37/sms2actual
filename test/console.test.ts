@@ -1840,7 +1840,7 @@ describe('console financial safeguards', () => {
     expect(imports.mock.calls[3]![1][0]).toMatchObject({ amount: -29, category: 'fees' });
     await app.close();
   });
-  it('retains unsupported nonempty Tasker messages in the log without importing them', async () => {
+  it('discards unrelated Tasker messages without retaining their contents', async () => {
     const { app, headers, store } = await server();
     await app.inject({ method: 'POST', url: '/api/console/tasker/rotate', headers, payload: {} });
     const start = await app.inject({
@@ -1867,9 +1867,10 @@ describe('console financial safeguards', () => {
     });
     expect(response.statusCode, response.body).toBe(202);
     expect(response.json().results[0].outcome).toBe('unsupported');
-    expect(store.list({ limit: 10 })).toMatchObject([
-      { status: 'ignored', parser_reason: 'unsupported_sender' },
-    ]);
+    expect(store.list({ limit: 10 })).toHaveLength(0);
+    expect(JSON.stringify(store.db.prepare('SELECT * FROM events').all())).not.toContain(
+      'Unsupported test message',
+    );
     await app.close();
   });
   it('sends overlapping reference templates to review', async () => {
@@ -2613,5 +2614,254 @@ it('restores a deleted inbox SMS after rewinding Tasker and deduplicates later r
   });
   expect((await submit(again.json().checkpoint)).json().results[0].outcome).toBe('duplicate');
   expect((await app.inject({ url: '/api/console/events', headers })).json().events).toHaveLength(1);
+  await app.close();
+});
+
+it('clears category warnings for existing linked repayments on both SMS sides using one Actual snapshot', async () => {
+  const { app, headers, store, actual, imports } = await server();
+  const cases = [
+    {
+      id: 'checking-entry',
+      accountId: 'checking',
+      alias: '1234',
+      amount: -97323,
+      kind: 'card_payment',
+      target: 'credit',
+      otherId: 'credit-entry',
+      snapshot: true,
+    },
+    {
+      id: 'credit-entry',
+      accountId: 'credit',
+      alias: '5678',
+      amount: 97323,
+      kind: 'transfer_in',
+      target: 'checking',
+      otherId: 'checking-entry',
+      snapshot: true,
+    },
+    {
+      id: 'legacy-repayment',
+      accountId: 'credit',
+      alias: '5678',
+      amount: 15000,
+      kind: 'transfer_in',
+      target: undefined,
+      otherId: 'legacy-checking',
+      snapshot: false,
+    },
+  ] as const;
+  const rows: HistoricalTransaction[] = cases.map((c) => ({
+    id: c.id,
+    accountId: c.accountId,
+    date: '2026-11-05',
+    amount: c.amount,
+    payeeName: 'Transfer',
+    transferId: c.otherId,
+    transferAccountId: c.target,
+  }));
+  actual.transactions = vi.fn(async (accountId) =>
+    rows.filter((row) => row.accountId === accountId),
+  );
+  actual.updateTransactions = vi.fn(async () => {});
+  const sync = vi.spyOn(actual, 'sync');
+  const before = new Map<string, string | null>();
+  for (const c of cases) {
+    store.enqueue({ eventId: c.id, sender: 'SAB', message: `Repayment ${c.id}`, receivedAt: now });
+    store.update(c.id, 'imported', {
+      actualTransactionId: c.id,
+      parsed: {
+        bank: 'sab',
+        kind: c.kind,
+        accountAlias: c.alias,
+        amountCents: c.amount,
+        feeCents: 0,
+        payee: 'Bank transfer',
+        occurredAt: now,
+        note: 'Repayment',
+        ...(c.kind === 'transfer_in' ? { cardPaymentReceived: true } : {}),
+        ...(c.snapshot ? { importCategoryId: null } : {}),
+      },
+    });
+    if (!c.snapshot) store.recordEnrichment(c.id, 'llm_low_confidence', {});
+    before.set(c.id, store.get(c.id)!.parsed);
+  }
+  const paired = store.enqueue({
+    eventId: 'paired-repayment-sms',
+    sender: 'SAB',
+    message: 'Second SMS for the linked repayment',
+    receivedAt: now,
+  });
+  store.update(paired.id, 'imported', {
+    parsed: {
+      bank: 'sab',
+      kind: 'transfer_in',
+      cardPaymentReceived: true,
+      accountAlias: '5678',
+      amountCents: 97323,
+      feeCents: 0,
+      payee: 'Bank transfer',
+      occurredAt: now,
+      note: 'Linked counterpart SMS',
+      importCategoryId: null,
+    },
+  });
+  store.recordTransfer(paired.id, 'credit', '1234', 97323, now, 'checking-entry');
+  before.set(paired.id, store.get(paired.id)!.parsed);
+  const list = await app.inject({ url: '/api/console/events', headers });
+  expect(list.statusCode, list.body).toBe(200);
+  expect(list.json().events).toHaveLength(cases.length + 1);
+  for (const event of list.json().events) expect(event.categoryNeedsAttention).toBe(false);
+  expect(sync).toHaveBeenCalledTimes(1);
+  expect(actual.transactions).toHaveBeenCalledTimes(2);
+  for (const c of [...cases, { id: paired.id }]) {
+    const detail = await app.inject({ url: `/api/console/events/${c.id}`, headers });
+    expect(detail.json().categoryNeedsAttention).toBe(false);
+    expect(store.get(c.id)!.parsed).toBe(before.get(c.id));
+  }
+  expect(imports).not.toHaveBeenCalled();
+  expect(actual.updateTransactions).not.toHaveBeenCalled();
+  await app.close();
+});
+
+it('keeps category warnings for unlinked receipts and purchases, including when Actual is unavailable', async () => {
+  const { app, headers, store, actual } = await server();
+  const rows: HistoricalTransaction[] = [];
+  for (const kind of ['transfer_in', 'card_payment', 'purchase'] as const) {
+    const id = kind + '-uncategorized';
+    store.enqueue({ eventId: id, sender: 'SAB', message: id, receivedAt: now });
+    store.update(id, 'imported', {
+      actualTransactionId: id,
+      parsed: {
+        bank: 'sab',
+        kind,
+        accountAlias: '1234',
+        amountCents: kind === 'transfer_in' ? 97323 : -97323,
+        feeCents: 0,
+        payee: 'Unlinked payment',
+        occurredAt: now,
+        note: 'Uncategorized',
+        importCategoryId: null,
+        ...(kind === 'transfer_in' ? { cardPaymentReceived: true } : {}),
+      },
+    });
+    rows.push({ id, accountId: 'checking', amount: 97323, date: '2026-11-05' });
+  }
+  actual.transactions = async (accountId) => rows.filter((row) => row.accountId === accountId);
+  const list = await app.inject({ url: '/api/console/events', headers });
+  expect(list.json().events.every((event: any) => event.categoryNeedsAttention)).toBe(true);
+  vi.spyOn(actual, 'sync').mockRejectedValueOnce(new Error('Actual is offline'));
+  const offline = await app.inject({ url: '/api/console/events', headers });
+  expect(offline.statusCode).toBe(200);
+  expect(offline.json().events.every((event: any) => event.categoryNeedsAttention)).toBe(true);
+  await app.close();
+});
+
+it('retains linked repayment outcomes while Actual is busy or offline, including legacy paired SMS', async () => {
+  const { app, headers, store, actual, processor } = await server();
+  for (const id of ['confirmed-link', 'legacy-debit', 'legacy-receipt', 'external']) {
+    store.enqueue({ eventId: id, sender: 'SAB', message: id, receivedAt: now });
+    store.update(id, 'imported', {
+      parsed: {
+        bank: 'sab',
+        kind: id === 'legacy-debit' ? 'card_payment' : 'transfer_in',
+        accountAlias: id === 'legacy-debit' ? '1234' : '5678',
+        amountCents: id === 'legacy-debit' ? -97323 : 97323,
+        feeCents: 0,
+        payee: 'Bank transfer',
+        occurredAt: now,
+        note: 'Repayment',
+        ...(id !== 'legacy-debit'
+          ? { importCategoryId: null }
+          : { transferCounterpartyAlias: '5678' }),
+        ...(id === 'confirmed-link'
+          ? { importTransferAccountId: 'checking' }
+          : id === 'external'
+            ? { importTransferAccountId: null }
+            : {}),
+      },
+    });
+  }
+  store.recordTransfer('legacy-debit', 'checking', '5678', -97323, now);
+  store.recordTransfer('legacy-receipt', 'credit', undefined, 97323, now, 'legacy-debit');
+  actual.sync = vi.fn(async () => {
+    throw new Error('Actual offline');
+  });
+  for (const busy of [false, true]) {
+    let release: () => void = () => {};
+    const holding = busy
+      ? processor.withActualAccess(
+          () =>
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+        )
+      : Promise.resolve();
+    try {
+      const list = await app.inject({ url: '/api/console/events', headers });
+      for (const event of list.json().events)
+        expect(event.categoryNeedsAttention).toBe(event.id === 'external');
+      for (const id of ['confirmed-link', 'legacy-receipt']) {
+        const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+        expect(detail.json().categoryNeedsAttention).toBe(false);
+      }
+    } finally {
+      release();
+      await holding;
+    }
+  }
+  await app.close();
+});
+
+it('rejects unrelated and unconfigured inbox senders from old Tasker projects while advancing the checkpoint', async () => {
+  const { app, headers, store } = await server();
+  const checkpoint = store.startInboxSync(1000);
+  const messages = [
+    { sender: 'Private friend', message: 'Personal text mentioning SAB' },
+    { sender: 'AlRajhiBank', message: 'Unselected bank content' },
+    { sender: null, message: 'SAB Purchase SAR 10' },
+    { sender: 'SAB', message: 'Unknown bank format' },
+  ];
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/inbox-sync/batch',
+    headers: { 'x-api-key': apiKey },
+    payload: {
+      checkpoint,
+      rows: messages.map((row, i) => ({ ...row, rowId: i + 1, date: 1001 + i })),
+    },
+  });
+  expect(response.statusCode, response.body).toBe(202);
+  expect(response.json().results.map((r: any) => r.outcome)).toEqual([
+    'unsupported',
+    'unsupported',
+    'unsupported',
+    'queued',
+  ]);
+  expect(response.json().checkpoint).toEqual({ date: 1004, rowId: 4 });
+  const list = await app.inject({ url: '/api/console/events', headers });
+  expect(list.json().events).toHaveLength(1);
+  expect(list.json().events[0].input.message).toBe('Unknown bank format');
+  await app.close();
+});
+
+it('returns exact teaching suggestions for unknown wording without treating hints as a supported format', async () => {
+  const { app, headers, store, processor, imports } = await server();
+  const message = 'تنبيه جديد ١٬٢٣٤٫٥٦ SR\nمن١٢٣٤\nرسوم:٠٫٢٩ SR\nرصيد:٩٠٠٠ SR';
+  const { id } = store.enqueue({ sender: 'SAB', message, receivedAt: now });
+  await processor.tick();
+  expect(store.get(id)?.status).toBe('unsupported_format');
+  const detail = await app.inject({ url: `/api/console/events/${id}`, headers });
+  expect(detail.json()).toMatchObject({
+    sourceAccountId: 'checking',
+    reviewDraft: { principalCents: -123456 },
+    reviewSelections: {
+      amount: { value: '١٬٢٣٤٫٥٦' },
+      suffix: { value: '١٢٣٤' },
+      fee: { value: '٠٫٢٩' },
+      balance: { value: '٩٠٠٠' },
+    },
+  });
+  expect(imports).not.toHaveBeenCalled();
   await app.close();
 });

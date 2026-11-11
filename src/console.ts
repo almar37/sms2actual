@@ -25,13 +25,19 @@ import type { ConsoleAuth } from './console-auth.js';
 import { validateAccountRules } from './config.js';
 import { merchantKey } from './merchant-resolver.js';
 import { merchantReviewReason } from './merchant-identity.js';
-import { extractReviewDraft, parseSms } from './parser.js';
+import { extractReviewDraft, extractReviewSelections, parseSms } from './parser.js';
 import { resolveSmsSource } from './sms-source.js';
 import { resolveAccount, resolveTransferTarget } from './routing.js';
 import { generateTaskerProject } from './tasker-export.js';
 import { currentBudgetDate } from './budget-date.js';
 import { actualConnectionSchema, type ActualConnection } from './actual-connection.js';
-import { readMessageActual, saveMessageActual, type MessageActualState } from './message-sync.js';
+import {
+  readMessageActual,
+  readMessageActualSnapshot,
+  hasImportedTransfer,
+  saveMessageActual,
+  type MessageActualState,
+} from './message-sync.js';
 import { transactionNotes } from './transaction-notes.js';
 import {
   deleteMessageActual,
@@ -56,12 +62,14 @@ export interface ConsoleOptions {
   taskerTemplatePath?: string;
 }
 const readJson = (value: string | null) => (value ? JSON.parse(value) : null);
-const eventView = (e: StoredEvent) => {
+const eventView = (e: StoredEvent, linked = false) => {
   const parsed = readJson(e.parsed) as ParsedTransaction | null;
   const imported = e.status === 'imported' || e.status === 'imported_review';
   const categoryNeedsAttention =
     imported &&
     parsed?.kind !== 'withdrawal' &&
+    !linked &&
+    !parsed?.importTransferAccountId &&
     (parsed?.importCategoryId === null ||
       (parsed?.importCategoryId === undefined &&
         e.enrichment_status?.startsWith('llm_') &&
@@ -326,11 +334,52 @@ export function registerConsole(
         `SELECT * FROM events ${clause} ORDER BY ${sort} ${q.direction},id ${q.direction} LIMIT 50 OFFSET ?`,
       )
       .all(...params, (q.page - 1) * 50) as StoredEvent[];
+    const events = rows.map((e) => ({
+      ...eventView(e, hasImportedTransfer(store, options.config, e)),
+      deletionPending: Boolean(store.pendingDeletion(e.id)),
+    }));
+    // Linked transfers intentionally have no expense category. Check Actual's
+    // existing link instead of interpreting a null import category as an error.
+    const transfers = rows.filter(
+      (e, index) =>
+        events[index]?.categoryNeedsAttention &&
+        ['transfer_in', 'transfer_out', 'card_payment'].includes(events[index]?.parsed?.kind ?? ''),
+    );
+    if (transfers.length) {
+      try {
+        await processor.withActualAccess(async () => {
+          const snapshot = await readMessageActualSnapshot(options.actual);
+          for (const event of transfers) {
+            try {
+              const view = events.find((view) => view.id === event.id)!;
+              const recorded = snapshot.rows.find((row) => row.id === event.actual_transaction_id);
+              if (recorded) {
+                view.categoryNeedsAttention =
+                  !recorded.transferId && !recorded.transferAccountId && !recorded.categoryId;
+                continue;
+              }
+              const state = await readMessageActual(
+                options.actual,
+                store,
+                options.config,
+                event,
+                snapshot,
+              );
+              view.categoryNeedsAttention =
+                !state.principal.transferId &&
+                !state.form.targetAccountId &&
+                !state.form.categoryId;
+            } catch {
+              // An unavailable or ambiguous link cannot dismiss a genuine review flag.
+            }
+          }
+        });
+      } catch {
+        // Keep the stored review flags if Actual is unavailable or busy.
+      }
+    }
     return {
-      events: rows.map((e) => ({
-        ...eventView(e),
-        deletionPending: Boolean(store.pendingDeletion(e.id)),
-      })),
+      events,
       total,
       page: q.page,
       lastTaskerSync: options.settings.get('lastTaskerSync') ?? null,
@@ -339,6 +388,7 @@ export function registerConsole(
   app.get<{ Params: { id: string } }>('/api/console/events/:id', async (req, reply) => {
     const event = store.get(req.params.id);
     if (!event) return reply.code(404).send({ error: 'Message not found' });
+    const view = eventView(event, hasImportedTransfer(store, options.config, event));
     const tx = readJson(event.parsed) as ParsedTransaction | null;
     let targetAccountId: string | null = null;
     if (tx && ['transfer_in', 'transfer_out', 'card_payment'].includes(tx.kind)) {
@@ -409,14 +459,25 @@ export function registerConsole(
         }
     }
     return {
-      ...eventView(event),
+      ...view,
       deletionPending: Boolean(store.pendingDeletion(event.id)),
       reviewDraft,
+      reviewSelections:
+        reviewDraft && input
+          ? extractReviewSelections(
+              input.message,
+              input.receivedAt,
+              options.config.banks,
+              input.sender ?? '',
+              options.config.parsing,
+            )
+          : {},
       categoryNeedsAttention: actualState
         ? !actualState.form.categoryId &&
+          !actualState.principal.transferId &&
           !actualState.form.targetAccountId &&
           actualState.form.kind !== 'withdrawal'
-        : eventView(event).categoryNeedsAttention,
+        : view.categoryNeedsAttention,
       actualSync: imported
         ? { form: actualState?.form, revision: actualState?.revision, error: syncError }
         : null,
@@ -430,7 +491,7 @@ export function registerConsole(
         ? {
             ...suggestion,
             applied:
-              !eventView(event).categoryNeedsAttention &&
+              !view.categoryNeedsAttention &&
               (tx?.importCategoryId === suggestion.categoryId ||
                 lastDecision?.status === 'llm_success'),
             threshold: decision?.threshold ?? null,

@@ -43,7 +43,7 @@ shared:
       patterns:
         - source: (?:outgoing transfer|transfer sent|funds?
             transfer\s+accepted|transfer\s+accepted|accepted.*sarie|sarie.*accepted|حوالة
-            صادرة|تحويل صادر|تم تحويل|تم قبول.*(?:حوالة|تحويل))
+            صادرة|تحويل صادر|(?:حوالة|تحويل)\s+(?:محلية|دولية)\s+صادر[ةه]?|تم تحويل|تم قبول.*(?:حوالة|تحويل))
           flags: iu
     - value: withdrawal
       patterns:
@@ -99,7 +99,7 @@ shared:
       - source: (?:account|acct|a\/c|حساب|الحساب|بطاقة|card)[^\d٠-٩]{0,12}(?:[*xX-]*)(?<value>[\d٠-٩]{3,6})
         flags: iu
     merchant:
-      - source: (?:merchant|\bat\b|entity|لدى|متجر|الجهة)\s*[:：]?\s*(?<value>[^,;]+?)(?=\s+(?:on|date|total\s+amount|amount|SAR|SR|for\s+(?:SAR|SR)|(?:available|current)\s+balance|balance|country|fees?\b|رصيد|في|بتاريخ|مبلغ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)
+      - source: (?:merchant|\bat\b|entity|لدى|متجر|الجهة|التاجر)\s*[:：]?\s*(?<value>[^,;]+?)(?=\s+(?:on|date|total\s+amount|amount|SAR|SR|for\s+(?:SAR|SR)|(?:available|current)\s+balance|balance|country|fees?\b|رصيد|في|بتاريخ|مبلغ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)
         flags: iu
     date:
       - source: (?<value>20\d\d[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)
@@ -270,6 +270,30 @@ shared:
       - source: \bcashback\s+of\b
         flags: iu
 templates:
+  - id: alrajhi-local-transfer-out
+    match:
+      - source: '^(?:حوالة|تحويل)\s+(?:محلية|دولية)\s+صادر[ةه]?(?=\s|ب|[:：]|$)'
+        flags: u
+    kind: transfer_out
+    fields:
+      principal:
+        - source: '^(?:حوالة|تحويل)\s+(?:محلية|دولية)\s+صادر[ةه]?\s*[:：]?\s*(?:بمبلغ|مبلغ|بـ?)?\s*[:：]?\s*(?<value>\d+(?:\.\d{1,2})?)\s*(?:SAR|SR)\b'
+          flags: iu
+        - source: '^(?:حوالة|تحويل)\s+(?:محلية|دولية)\s+صادر[ةه]?\s*[:：]?\s*(?:بمبلغ|مبلغ|بـ?)?\s*[:：]?\s*(?:SAR|SR)\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|$)'
+          flags: iu
+      from:
+        - source: '(?:^|\s)من\s*[:：]?\s*[*xX-]*(?<value>\d{3,6})(?=\s|[;؛]|$)'
+          flags: iu
+      to:
+        - source: '(?:^|\s)(?:لـ?|إلى|الى)\s*[:：]?\s*[*xX-]*(?<value>\d{3,6})(?=\s|[;؛]|$)'
+          flags: iu
+      beneficiary:
+        - source: '(?:^|\s)(?:لـ?|إلى|الى)\s*[:：]?\s*[*xX-]*\d{3,6}[;؛]\s*(?<value>[^;؛]+?)(?=\s+(?:رسوم|\d{1,2}[:/])|$)'
+          flags: iu
+      date:
+        - source: '(?<value>\d{1,2}/\d{1,2}/\d{1,4}(?:\s+\d{1,2}:\d{2})?)'
+          flags: u
+    required: [principal, from, to]
   - id: alrajhi-own-transfer
     match:
       - source: 'حوالة بين حساباتك'
@@ -291,7 +315,7 @@ templates:
           flags: iu
       merchant:
         - &labelledMerchant
-          source: '(?:^|\s)(?:merchant(?=[ \t:：])|at(?=[ \t:：])|entity(?=[ \t:：])|لدى|لـ|الجهة)[ \t]*[:：]?[ \t]*(?<value>[^\s\n][^\n]*?)(?=[ \t]*(?:\n|$)|[ \t]+(?:(?:total\s+due\s+amount|total\s+amount|amount|(?:available\s+|current\s+)?balance|country|fees?(?:\s*(?:&|and)\s*vat)?|exchange\s+rate|رصيد|الرصيد(?:\s+المتاح)?|مبلغ|المبلغ|رسوم|الرسوم(?:\s*والضريبة)?)[ \t]*[:：~]|(?:on|date|في|بتاريخ)?[ \t]*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}(?:[ T]\d{1,2}:\d{2})?))'
+          source: '(?:^|\s)(?:merchant(?=[ \t:：])|at(?=[ \t:：])|entity(?=[ \t:：])|لدى|لـ|الجهة|التاجر)[ \t]*[:：]?[ \t]*(?<value>[^\s\n][^\n]*?)(?=[ \t]*(?:\n|$)|[ \t]+(?:(?:total\s+due\s+amount|total\s+amount|amount|(?:available\s+|current\s+)?balance|country|fees?(?:\s*(?:&|and)\s*vat)?|exchange\s+rate|رصيد|الرصيد(?:\s+المتاح)?|مبلغ|المبلغ|رسوم|الرسوم(?:\s*والضريبة)?)[ \t]*[:：~]|(?:(?:on|date|في|بتاريخ)[ \t]*[:：]?)?[ \t]*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}(?:[ T]\d{1,2}:\d{2})?))'
           flags: iu
 
       balance:
@@ -307,6 +331,8 @@ templates:
     fields:
       principal:
         - source: '^بطاقة\s+فيزا\s*[:：]\s*سداد\s+بـ?\s*(?:SAR|SR|ر\.?س\.?)\s*(?<value>\d+(?:\.\d{1,2})?)(?=\s|\\n|$)'
+          flags: iu
+        - source: '^بطاقة\s+فيزا\s*[:：]\s*سداد\s+بـ?\s*(?<value>\d+(?:\.\d{1,2})?)\s*(?:SAR|SR|ر\.?س\.?)(?=\s|$)'
           flags: iu
       accountAlias:
         - source: '(?:^|\s|\\n)عبر\s*[:：]?\s*[*xX-]*(?<value>\d{3,6})(?!\d)'
@@ -339,7 +365,7 @@ templates:
     required: [merchant]
   - id: alrajhi-card-refund
     match:
-      - source: '^(?:Reverse Transaction|Refund|عكس عملية|استرداد)(?=\s|$)'
+      - source: '^(?:Reverse Transaction|Refund|عكس عملية|استرداد|بطاقة\s+[إائ]ئ?تمانية\s+استرداد)(?=\s|$)'
         flags: iu
     kind: refund
     fields:

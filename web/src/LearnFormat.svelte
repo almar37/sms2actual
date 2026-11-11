@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import { DateTime } from 'luxon';
   import { api, actions } from './api.js';
   import {
     patternFromSelections,
@@ -11,14 +13,31 @@
   } from '../../src/template-selection.js';
   let { event, catalog, onlearned }: { event: any; catalog: any; onlearned: () => void } = $props();
   let name = $state(''),
-    kind = $state(''),
+    kind = $state(untrack(() => event.reviewDraft?.kind ?? '')),
     categoryId = $state(''),
     dateFormat = $state<TemplateDateFormat>('iso'),
-    values = $state<TemplateSelections>({}),
+    values = $state<TemplateSelections>(
+      untrack(() => JSON.parse(JSON.stringify(event.reviewSelections ?? {}))),
+    ),
     field = $state<SelectionField>('amount'),
     selectedText = $state<{ value: string; start: number } | null>(null),
     busy = $state(false),
     error = $state('');
+  dateFormat = untrack(() => {
+    const date = values.date?.value;
+    if (!date) return 'iso';
+    return (
+      (Object.keys(templateDateFormats) as TemplateDateFormat[]).find(
+        (format) =>
+          format !== 'iso' &&
+          DateTime.fromFormat(
+            date.replace(/[٠-٩]/gu, (d) => String(d.charCodeAt(0) - 1632)),
+            format,
+            { zone: 'Asia/Riyadh' },
+          ).toMillis() === DateTime.fromISO(event.reviewDraft?.occurredAt ?? '').toMillis(),
+      ) ?? 'iso'
+    );
+  });
   const labels: Record<SelectionField, string> = {
     amount: 'Amount',
     merchant: 'Merchant identifier',
@@ -78,6 +97,10 @@
 
 <section class="learn-format">
   <h3>Teach this format</h3>
+  {#if Object.keys(values).length}<p class="muted small">
+      Recognized values are filled in below. Check the selections and mark any other values that
+      change.
+    </p>{/if}
   <p class="muted small">
     Select the values in the received SMS, or copy them exactly into the boxes below. Keep currency
     symbols and labels outside the selection. All unmarked text stays fixed in future messages.

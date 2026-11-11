@@ -10,6 +10,7 @@ import { InboxCheckpointConflict, type EventStore } from './db.js';
 import type { BankConfig } from './types.js';
 import type { Processor } from './processor.js';
 import { resolveSmsSource } from './sms-source.js';
+import { normalizeSender } from './config.js';
 
 const smsInputSchema = z.object({
   eventId: z.string().min(1).max(200).optional(),
@@ -219,13 +220,14 @@ export function buildServer(options: {
       return reply.code(202).send({ results });
     },
   );
-  app.post('/v1/inbox-sync/start', async () => {
+  const inboxSenders = () => {
     const bankIds = options.console
       ? new Set(options.console.config.accounts.map((a) => a.match.bank))
       : new Set(options.banks.map((b) => b.id));
-    const senders = [
-      ...new Set(options.banks.filter((b) => bankIds.has(b.id)).flatMap((b) => b.senders)),
-    ];
+    return [...new Set(options.banks.filter((b) => bankIds.has(b.id)).flatMap((b) => b.senders))];
+  };
+  app.post('/v1/inbox-sync/start', async () => {
+    const senders = inboxSenders();
     // SQL literals are escaped here; the phone uses this filter in its SMS content-provider query.
     const senderFilter = senders.length
       ? `LOWER(TRIM(address)) IN (${senders.map((s) => "'" + s.trim().toLowerCase().replaceAll("'", "''") + "'").join(',')})`
@@ -278,15 +280,18 @@ export function buildServer(options: {
         }
         previous = { date: row.date, rowId: row.rowId };
       }
+      const allowedSenders = new Set(inboxSenders().map(normalizeSender));
       const entries = parsed.data.rows.map((row) => {
         const message = row.message?.trim();
         if (!message) return { row, skipped: 'empty' as const };
+        // Old phone projects must not populate the inbox with unrelated SMS.
+        if (!allowedSenders.has(normalizeSender(row.sender ?? '')))
+          return { row, skipped: 'unsupported' as const };
         const source = resolveSmsSource(row.sender ?? '', message, options.banks);
-        if (source.type === 'unsupported' && source.disposition === 'ignored' && !options.console)
+        if (source.type === 'unsupported' && source.disposition === 'ignored')
           return { row, skipped: 'unsupported' as const };
         return {
           row,
-          retainIgnored: source.type === 'unsupported' && source.disposition === 'ignored',
           input: {
             eventId: `inbox-v2-${row.date}-${row.rowId}`,
             ...(row.sender ? { sender: row.sender } : {}),

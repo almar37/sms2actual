@@ -10,7 +10,7 @@ describe('SMS parser fixture corpus', () => {
   });
 
   it('tracks the parser release represented by the corpus', () => {
-    expect(PARSER_REVISION).toBe(17);
+    expect(PARSER_REVISION).toBe(18);
   });
 });
 
@@ -290,6 +290,7 @@ describe('Al Rajhi compact credit-card payment receipts', () => {
     ['CRLF', message.replaceAll('\\n', '\r\n')],
     ['Arabic digits', message.replace('80.50', '٨٠٫٥٠').replace('2393', '٢٣٩٣')],
     ['no balance', message.replace('رصيد:1200.1 SR', '')],
+    ['currency after amount', message.replace('SR 80.50', '80.50 SR')],
   ])('credits the card without inventing a funding account with %s', (_name, sms) => {
     expect(parse(sms!)).toMatchObject({
       type: 'transaction',
@@ -323,6 +324,65 @@ describe('Al Rajhi compact credit-card payment receipts', () => {
     expect(result).toMatchObject({ type: 'transaction', transaction: { kind: 'transfer_in' } });
     if (result.type === 'transaction')
       expect(result.transaction.cardPaymentReceived).toBeUndefined();
+  });
+});
+
+describe('reported Arabic refund and local transfer formats', () => {
+  const receivedAt = '2026-11-11T20:10:00+03:00';
+  const transfer =
+    'حوالة محلية صادرة بـSR 100\nمن0131\nلـ1000;Example Recipient\nرسوم:0.29 SR\n26/11/11 20:08';
+  const refund =
+    'بطاقة ائتمانية استرداد مبلغ\nبطاقة:8077;فيزا\nمبلغ:119 SAR\nالتاجر:Amazon sa\nفي:11/11/26 20:08';
+  const parse = (sms: string) => parseSms(sms, receivedAt, banks, 'AlRajhiBank', parsing);
+
+  it.each(['\n', '\\n', '\r\n', ' '])(
+    'parses both reported formats with %j separators',
+    (separator) => {
+      expect(parse(transfer.replaceAll('\n', separator))).toMatchObject({
+        type: 'transaction',
+        transaction: {
+          kind: 'transfer_out',
+          accountAlias: '0131',
+          transferCounterpartyAlias: '1000',
+          principalCents: -10000,
+          amountCents: -10029,
+          feeCents: 29,
+          payee: 'Example Recipient',
+          occurredAt: '2026-11-11T20:08:00.000+03:00',
+        },
+      });
+      expect(parse(refund.replaceAll('\n', separator))).toMatchObject({
+        type: 'transaction',
+        transaction: {
+          kind: 'refund',
+          accountAlias: '8077',
+          amountCents: 11900,
+          payee: 'Amazon sa',
+        },
+      });
+    },
+  );
+  it.each([
+    transfer.replace('SR 100', '١٠٠ SR').replace('0131', '٠١٣١'),
+    transfer.replace('صادرة بـSR 100', 'صادرةبـ100 SR'),
+  ])('parses compact wording and Arabic numerals: %s', (message) => {
+    expect(parse(message)).toMatchObject({
+      type: 'transaction',
+      transaction: { principalCents: -10000, accountAlias: '0131' },
+    });
+  });
+  it.each([
+    transfer.replace('SR 100', 'USD 100'),
+    transfer.replace('SR 100', 'SR 100.001'),
+    transfer.replace('SR 100', 'SR -100'),
+    transfer.replace('من0131', ''),
+    transfer.replace('لـ1000', ''),
+    refund.replace('Amazon sa', ''),
+  ])('keeps malformed values in review: %s', (message) => {
+    expect(parse(message)).toMatchObject({
+      type: 'needs_review',
+      reason: 'malformed_notification',
+    });
   });
 });
 

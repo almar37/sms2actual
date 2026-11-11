@@ -193,6 +193,7 @@ describe('credit-card repayment funding defaults', () => {
       expect(JSON.parse(store.get(receipt.eventId)!.parsed!)).toMatchObject({
         cardPaymentReceived: true,
         assumedFundingAccountId: creditCardPaymentFundingAccount.id,
+        importTransferAccountId: creditCardPaymentFundingAccount.id,
       });
     },
   );
@@ -616,6 +617,8 @@ describe('processor transfer routing', () => {
       expect(imported[0]?.transactions[0]).toMatchObject({ payee: `transfer:${targetAccountId}` });
       expect(store.get(firstEvent)?.status).toBe('imported');
       expect(store.get(secondEvent)?.status).toBe('imported');
+      for (const id of [firstEvent, secondEvent])
+        expect(JSON.parse(store.get(id)!.parsed!).importTransferAccountId).toBeTruthy();
     },
   );
 
@@ -651,6 +654,32 @@ describe('processor transfer routing', () => {
     expect(ids).toContain(expected);
     expect(new Set(ids)).toHaveLength(2);
   });
+});
+
+it('re-evaluates retained compact transfers after the parser upgrade without replaying imported SMS', async () => {
+  const { store, processor, imported } = setup();
+  const input = {
+    sender: 'AlRajhiBank',
+    message:
+      'حوالة محلية صادرةبـ100 SR\nمن0131\nلـ1000;Example Recipient\nرسوم:0.29 SR\n26/11/11 20:08',
+    receivedAt: '2026-11-11T20:10:00+03:00',
+  };
+  store.enqueue({ ...input, eventId: 'previously-unsupported' });
+  store.update('previously-unsupported', 'unsupported_format', {
+    parserRevision: 17,
+    parserReason: 'unrecognized_template',
+  });
+  store.enqueue({
+    ...input,
+    message: input.message.replace('100 SR', '200 SR'),
+    eventId: 'already-imported',
+  });
+  store.update('already-imported', 'imported', { parserRevision: 17 });
+  expect(store.replayParserRevision(PARSER_REVISION)).toBe(1);
+  await processor.tick();
+  expect(store.get('previously-unsupported')?.status).toBe('imported');
+  expect(imported).toHaveLength(2); // principal + fee, both on the outgoing account
+  expect(store.replayParserRevision(PARSER_REVISION)).toBe(0);
 });
 
 it('does not let an unrelated credit suppress a configured transfer', async () => {

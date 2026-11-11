@@ -300,7 +300,8 @@
             <strong>Import into Tasker</strong>
             <p>
               On Android, press and hold the home / project tab in Tasker, choose Import Project,
-              and select sms2actual.prj.xml.
+              and select sms2actual.prj.xml. When updating, disable or remove the old sms2actual /
+              Actual SMS Inbox project first so its scheduled task cannot keep uploading messages.
             </p>
           </li>
           <li>
